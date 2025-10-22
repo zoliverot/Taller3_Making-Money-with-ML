@@ -1,9 +1,6 @@
-
 ---
-
 ### **Propósito:** Crear variables nuevas (texto y externas, mínimo 8).
-
-```r
+```
 ---
 title: "02 - Feature Engineering"
 output: html_document
@@ -12,4 +9,4 @@ output: html_document
 ```{r}
 source("../origen/config.R")
 source("../origen/data_utils.R")
-
+```
