@@ -1,6 +1,11 @@
 ---
-title: '06 spatial cv'
+### **Propósito:** Evaluar cómo cambia el desempeño usando validación espacial.
+---
+title: "06 - Spatial Cross Validation"
 output: html_document
 ---
 
-# 06_spatial_cv.Rmd
+```{r setup, include=FALSE}
+source("../origen/config.R")
+source("../origen/modeling_utils.R")
+```
