@@ -1,0 +1,6 @@
+---
+title: '06 spatial cv'
+output: html_document
+---
+
+# 06_spatial_cv.Rmd

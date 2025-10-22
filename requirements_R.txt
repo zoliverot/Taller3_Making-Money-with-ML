@@ -1,0 +1,13 @@
+tidyverse
+sf
+caret
+randomForest
+xgboost
+rpart
+ranger
+nnet
+glmnet
+ggplot2
+leaflet
+tmap
+spdep

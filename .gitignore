@@ -1,0 +1,10 @@
+# Archivos a ignorar
+data/raw/
+outputs/logs/
+.Rhistory
+.RData
+.Rproj.user/
+__pycache__/
+*.tmp
+*.csv
+*.zip
