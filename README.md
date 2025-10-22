@@ -79,4 +79,4 @@ install.packages(readLines('requirements_R.txt'))
 - OpenStreetMap (OSM) — capas espaciales
 
 ---
-**Repositorio:** https://github.com/equipo_08/ps3-ml-housing-equipo_08
+**Repositorio:** https://github.com/zoliverot/Taller3_Making-Money-with-ML
