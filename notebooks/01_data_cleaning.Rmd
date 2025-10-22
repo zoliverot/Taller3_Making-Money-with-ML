@@ -1,6 +1,11 @@
+
 ---
-title: '01 data cleaning'
+title: "01 - Limpieza y Preparación de Datos"
 output: html_document
 ---
+# En este notebook se realiza la limpieza inicial de los datos obtenidos de Properati y otras fuentes.
+```{r}
+source("../origen/config.R")
+source("../origen/data_utils.R")
+```
 
-# 01_data_cleaning.Rmd
