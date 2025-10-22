@@ -27,6 +27,7 @@ test_df$price_pred <- predict(best_model, newdata = test_df)
 # Crear dataframe con formato Kaggle
 kaggle_submission <- test_df %>%
   select(property_id, price = price_pred)
+```
 ```{r}
 # Verificar estructura
 head(kaggle_submission)
