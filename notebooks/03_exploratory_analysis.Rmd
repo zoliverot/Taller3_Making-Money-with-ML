@@ -1,6 +1,12 @@
 ---
-title: '03 exploratory analysis'
+### **Propósito:** Análisis descriptivo y visual de las variables.
+```
+---
+title: "03 - Exploratory Data Analysis"
 output: html_document
 ---
 
-# 03_exploratory_analysis.Rmd
+```{r}
+source("../origen/config.R")
+source("../origen/visualization.R")
+```
