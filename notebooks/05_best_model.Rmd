@@ -12,3 +12,32 @@ source("../origen/visualization.R")
 ```
 
 ## Discute qué variables fueron más importantes y por qué el modelo tuvo mejor desempeño. ###
+
+
+
+```{r}
+# ==========================================================
+# Generar y guardar archivo de predicciones para Kaggle
+# ==========================================================
+
+# Supongamos que tu mejor modelo fue Random Forest
+best_model <- model_rf
+
+# Generar predicciones de precio
+test_df$price_pred <- predict(best_model, newdata = test_df)
+
+# Crear dataframe con formato Kaggle
+kaggle_submission <- test_df %>%
+  select(property_id, price = price_pred)
+```
+```{r}
+# Verificar estructura
+head(kaggle_submission)
+```
+```{r}
+# Guardar archivo CSV en la carpeta de resultados
+write_csv(kaggle_submission,
+           file.path(path_outputs, "kaggle_submissions", "submission_equipo_08_rf.csv"))
+
+cat("Archivo de predicciones generado con éxito.\n")
+```
