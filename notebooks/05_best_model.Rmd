@@ -1,6 +1,14 @@
 ---
-title: '05 best model'
+### **Propósito:** Profundizar en el modelo con menor RMSE.
+---
+title: "05 - Best Model Analysis"
 output: html_document
 ---
 
-# 05_best_model.Rmd
+```{r setup, include=FALSE}
+source("../origen/config.R")
+source("../origen/modeling_utils.R")
+source("../origen/visualization.R")
+```
+
+## Discute qué variables fueron más importantes y por qué el modelo tuvo mejor desempeño. ###
