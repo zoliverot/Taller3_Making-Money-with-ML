@@ -1,5 +1,10 @@
 ---
-title: "07_model_comparison"
+###**Propósito:** Comparar los 7 modelos finales y visualizar resultados.
+---
+title: "07 - Model Comparison"
 output: html_document
 ---
 
+```{r}
+source("../origen/config.R")
+```
