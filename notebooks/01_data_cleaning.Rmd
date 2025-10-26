@@ -1,11 +1,20 @@
 
 ---
-title: "01 - Limpieza y Preparación de Datos"
+title: "Problem Set 3 - BDML"
+author: "Cristian Muñoz - Vivian Cabanzo - Zeneth Olivero - Laura Diaz"
+date: "2025-11-23"
 output: html_document
 ---
-# En este notebook se realiza la limpieza inicial de los datos obtenidos de Properati y otras fuentes.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Limpieza de datos
 ```{r}
-source("../origen/config.R")
-source("../origen/data_utils.R")
+test <- read.csv("C:/Users/crist/Downloads/uniandes-bdml-2025-20-ps-3/test.csv")
+View(test)
+train <- read.csv("C:/Users/crist/Downloads/uniandes-bdml-2025-20-ps-3/train.csv")
+View(train)
 ```
 
