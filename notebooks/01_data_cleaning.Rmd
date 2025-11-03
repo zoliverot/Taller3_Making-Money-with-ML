@@ -8,13 +8,216 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate
+)
 ```
 
 # 1. Limpieza de datos
 ```{r}
-test <- read.csv("C:/Users/crist/Downloads/uniandes-bdml-2025-20-ps-3/test.csv")
-View(test)
-train <- read.csv("C:/Users/crist/Downloads/uniandes-bdml-2025-20-ps-3/train.csv")
-View(train)
+test <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/test.csv")
+train <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/train.csv")
+
+theme_set(theme_minimal())
+
+# Opcional: normalizar nombres a snake_case
+train <- janitor::clean_names(train)
+test  <- janitor::clean_names(test)
+
+# Define tu objetivo (ajusta si se llama distinto)
+target <- "price"
+
+# ===============================
+# 2) Estructura y diferencias básicas
+# ===============================
+cat("\nDimensiones:\n")
+cat("train: ", paste(dim(train), collapse=" x "), "\n")
+cat("test : ", paste(dim(test),  collapse=" x "), "\n")
+
+train_cols <- names(train)
+test_cols  <- names(test)
+
+cols_common        <- intersect(train_cols, test_cols)
+cols_train_only    <- setdiff(train_cols, test_cols)
+cols_test_only     <- setdiff(test_cols, train_cols)
+cols_common_nontgt <- setdiff(cols_common, target)
+
+cat("\nColumnas SOLO en train (excluyendo target):\n")
+print(setdiff(cols_train_only, target))
+cat("\nColumnas SOLO en test:\n")
+print(cols_test_only)
+
+cat("\nPrimeras columnas comunes:\n")
+print(head(cols_common, 20))
+
+# ===============================
+# 3) Tipos de datos y vistazo
+# ===============================
+cat("\nGlimpse train:\n")
+glimpse(train)
+cat("\nGlimpse test:\n")
+glimpse(test)
+
+# Resumen amigable
+cat("\nResumen SKIM (train):\n")
+skimr::skim(train)
+
+# ===============================
+# 4) Chequeos de duplicados
+# ===============================
+# Si tienes un id (p.ej. property_id) cambia aquí:
+id_col <- dplyr::case_when(
+  "property_id" %in% names(train) ~ "property_id",
+  TRUE ~ NA_character_
+)
+
+if (!is.na(id_col)) {
+  dup_train <- train %>% count(.data[[id_col]]) %>% filter(n > 1) %>% nrow()
+  dup_test  <- test  %>% count(.data[[id_col]]) %>% filter(n > 1) %>% nrow()
+  cat("\nDuplicados por ID en train:", dup_train, " | en test:", dup_test, "\n")
+} else {
+  cat("\n(No se detectó columna ID típica; se revisan duplicados de filas completas)\n")
+  cat("Filas duplicadas en train:", sum(duplicated(train)), "\n")
+  cat("Filas duplicadas en test :", sum(duplicated(test)),  "\n")
+}
+
+# ===============================
+# 5) Faltantes (NA) y comparaciones
+# ===============================
+cat("\nFaltantes por variable (train):\n")
+miss_train <- naniar::miss_var_summary(train) %>% rename(n_miss_train = n_miss, pct_miss_train = pct_miss)
+print(head(miss_train, 15))
+
+cat("\nFaltantes por variable (test):\n")
+miss_test <- naniar::miss_var_summary(test) %>% rename(n_miss_test = n_miss, pct_miss_test = pct_miss)
+print(head(miss_test, 15))
+
+# Comparación NA train vs test (solo columnas comunes)
+miss_compare <- full_join(miss_train %>% rename(variable = variable),
+                          miss_test  %>% rename(variable = variable),
+                          by = "variable") %>%
+  mutate(across(starts_with("pct_miss"), ~replace_na(., 0))) %>%
+  arrange(desc(abs(pct_miss_train - pct_miss_test)))
+
+cat("\nTop 15 diferencias de faltantes (train vs test):\n")
+print(head(miss_compare, 15))
+
+# Visual rápido de NA
+naniar::vis_miss(train %>% select(all_of(cols_common_nontgt))) +
+  ggtitle("Mapa de faltantes - TRAIN (solo columnas comunes sin target)")
+
+naniar::vis_miss(test %>% select(all_of(cols_common_nontgt))) +
+  ggtitle("Mapa de faltantes - TEST (solo columnas comunes sin target)")
+
+DataExplorer::plot_missing(train %>% select(all_of(cols_common_nontgt))) +
+  ggtitle("Proporción de faltantes por variable - TRAIN")
+
+DataExplorer::plot_missing(test %>% select(all_of(cols_common_nontgt))) +
+  ggtitle("Proporción de faltantes por variable - TEST")
+
+# ===============================
+# 6) Detectar numéricas vs categóricas
+# ===============================
+is_num <- function(x) is.numeric(x) || inherits(x, c("integer","numeric","double"))
+num_cols <- train %>%
+  select(any_of(cols_common_nontgt)) %>%
+  select(where(is_num)) %>% names()
+
+cat_cols <- setdiff(cols_common_nontgt, num_cols)
+
+cat("\nNuméricas:\n"); print(num_cols)
+cat("\nCategóricas:\n"); print(cat_cols)
+
+# ===============================
+# 7) Distribuciones (gráficos sencillos)
+# ===============================
+
+# 7.1 Histograma para cada numérica (train)
+if (length(num_cols) > 0) {
+  train %>%
+    select(all_of(num_cols)) %>%
+    pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
+    ggplot(aes(x = valor)) +
+    geom_histogram(bins = 30) +
+    facet_wrap(~ variable, scales = "free", ncol = 3) +
+    labs(title = "Histogramas (TRAIN)", x = NULL, y = "Frecuencia")
+}
+
+# 7.2 Densidad del target (train), si existe
+if (target %in% names(train)) {
+  # Densidad en escala original
+  ggplot(train, aes(x = .data[[target]])) +
+    geom_density() +
+    labs(title = paste("Densidad de", target, "(TRAIN)"), x = target, y = "Densidad")
+
+  # Densidad en log (opcional)
+  if (all(is.finite(train[[target]]), na.rm = TRUE)) {
+    ggplot(train %>% filter(.data[[target]] > 0), aes(x = log1p(.data[[target]]))) +
+      geom_density() +
+      labs(title = paste("Densidad de log1p(", target, ") (TRAIN)"), x = paste0("log1p(", target, ")"), y = "Densidad")
+  }
+}
+
+# 7.3 Boxplots del target por algunas categóricas (top k categorías más frecuentes)
+top_k_levels <- function(x, k = 12) {
+  forcats::fct_lump_n(x, n = k, other_level = "otros")
+}
+
+if (target %in% names(train) && length(cat_cols) > 0) {
+  for (cc in cat_cols) {
+    p <- train %>%
+      mutate(..grp = top_k_levels(.data[[cc]], k = 12)) %>%
+      ggplot(aes(x = ..grp, y = .data[[target]])) +
+      geom_boxplot(outlier.alpha = 0.2) +
+      coord_flip() +
+      labs(title = paste("Boxplot de", target, "por", cc, "(TRAIN)"),
+           x = cc, y = target)
+    print(p)
+  }
+}
+
+# 7.4 Pares de variables (scatter) para algunas numéricas clave
+pairs_cols <- intersect(num_cols, c("bathrooms","bedrooms","rooms","surface_total","surface_covered","lat","lon","year","month"))
+if (length(pairs_cols) >= 2 && target %in% names(train)) {
+  df_pairs <- train %>% select(all_of(pairs_cols), all_of(target)) %>% drop_na()
+  GGally::ggpairs(df_pairs, columns = 1:length(pairs_cols),
+                  title = "Matriz de pares (subset numérico) - TRAIN")
+}
+
+# ===============================
+# 8) Correlaciones numéricas
+# ===============================
+if (length(num_cols) >= 2) {
+  # correlaciones entre numéricas (train)
+  cormat <- train %>% select(all_of(num_cols)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    cor(use = "pairwise.complete.obs")
+
+  ggcorrplot::ggcorrplot(cormat, lab = FALSE, type = "lower") +
+    ggtitle("Correlación entre variables numéricas (TRAIN)")
+
+  # correlación con target si numérico
+  if (target %in% names(train) && is.numeric(train[[target]])) {
+    cor_with_target <- train %>%
+      select(all_of(num_cols), all_of(target)) %>%
+      cor(use = "pairwise.complete.obs") %>%
+      as.data.frame() %>%
+      rownames_to_column("variable") %>%
+      select(variable, all_of(target)) %>%
+      arrange(desc(abs(.data[[target]])))
+    cat("\nCorrelación con el target (TRAIN):\n")
+    print(cor_with_target)
+  }
+}
+
+# ===============================
+# 9) Recomendación de columnas a modelar
+# ===============================
+keep_features <- setdiff(cols_common, target)  # lo común menos la y
+cat("\nFeatures a usar (comunes, sin target):\n")
+print(keep_features)
 ```
 
