@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi
 )
 ```
 
@@ -219,5 +219,47 @@ if (length(num_cols) >= 2) {
 keep_features <- setdiff(cols_common, target)  # lo común menos la y
 cat("\nFeatures a usar (comunes, sin target):\n")
 print(keep_features)
+```
+# Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
+```{r}
+
+# Normaliza: minúsculas, sin tildes, espacios compactados
+normalize_text <- function(x) {
+  x %>%
+    tidyr::replace_na("") %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    tolower() %>%
+    stringr::str_squish()
+}
+
+# Crea las 4 dummies desde title + description
+add_text_dummies <- function(df) {
+  stopifnot(all(c("title","description") %in% names(df)))
+  
+  txt <- normalize_text(paste(df$title, df$description))
+  
+  # Patrones (regex) — puedes ajustar si quieres ampliar vocabulario
+  rx_parqueadero_garaje <- stringr::regex("\\b(parqueadero|garaje|estacionamiento)s?\\b", ignore_case = TRUE)
+  rx_cocina_integral    <- stringr::regex("\\bcocina integral\\b", ignore_case = TRUE)
+  rx_estudio            <- stringr::regex("\\bestudio(s)?\\b", ignore_case = TRUE)
+  rx_chimenea           <- stringr::regex("\\bchimenea(s)?\\b", ignore_case = TRUE)
+  
+  df %>%
+    mutate(
+      has_parqueadero_garaje = as.integer(stringr::str_detect(txt, rx_parqueadero_garaje)),
+      has_cocina_integral    = as.integer(stringr::str_detect(txt, rx_cocina_integral)),
+      has_estudio            = as.integer(stringr::str_detect(txt, rx_estudio)),
+      has_chimenea           = as.integer(stringr::str_detect(txt, rx_chimenea))
+    )
+}
+
+# === Uso ===
+# train ya cargado como data.frame/tibble con columnas title y description
+train_ready <- add_text_dummies(train)
+test_ready <- add_text_dummies(test)
+
+# (Opcional) ver cobertura de cada dummie en train
+colMeans(dplyr::select(train_ready, starts_with("has_")))
+
 ```
 
