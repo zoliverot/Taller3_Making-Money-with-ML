@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble
 )
 ```
 
@@ -220,6 +220,160 @@ keep_features <- setdiff(cols_common, target)  # lo común menos la y
 cat("\nFeatures a usar (comunes, sin target):\n")
 print(keep_features)
 ```
+# Análisis de texto
+```{r}
+# --- 1) Normalizador de texto (lower + sin tildes + espacios compactados) ---
+normalize_text <- function(x) {
+  x %>%
+    tidyr::replace_na("") %>%
+    stringi::stri_trans_general("Latin-ASCII") %>% # quita tildes
+    tolower() %>%
+    stringr::str_squish()
+}
+
+# --- 2) Diccionario de atributos (regex) para dummies desde title+description ---
+# Puedes ajustar/expandir vocabulario según tu mercado
+attr_patterns <- list(
+  ubic_parque          = "\\bparques?\\b(?!adero)",                             # parque, no parqueadero
+  parqueadero_garaje   = "\\b(parqueadero|garaje|estacionamiento)s?\\b",
+  transporte_metro_tm  = "\\b(metro|transmilenio|sitp|subte|estacion|paradero)\\b",
+  colegio_universidad  = "\\b(colegios?|universidades?|jardin(?:es)? infantil(?:es)?)\\b",
+  salud_hospital       = "\\b(hospital(es)?|clinica(s)?|centro(s)? medico(s)?)\\b",
+  centro_comercial     = "\\b(centro(s)? comercial(es)?)\\b",
+  supermercado         = "\\b(supermercado(s)?|tienda(s)?|exito|carulla|jumbo|olimpica|d1|ara)\\b",
+  seguridad            = "\\b(vigilancia|porteri[ai]|seguridad|camaras?)\\b",
+  amenities            = "\\b(piscina|gimnasio|bbq|sal[oó]n social|zona social|zona infantil)\\b",
+  ascensor             = "\\bascensor(es)?\\b",
+  balcon               = "\\bbalcon(es)?\\b",
+  terraza              = "\\bterraza(s)?\\b",
+  remodelado           = "\\b(remodelad[oa]s?|remodelaci[oó]n)\\b",
+  cocina_integral      = "\\bcocina integral\\b",
+  iluminacion          = "\\biluminaci[oó]n\\b",
+  ventilacion          = "\\bventilaci[oó]n\\b",
+  patio                = "\\bpatio(s)?\\b",
+  estudio              = "\\bestudio(s)?\\b",
+  deposito             = "\\bdepo[si]t[oó]s?\\b|\\bbaulera(s)?\\b|\\btrastero(s)?\\b",
+  chimenea             = "\\bchimenea(s)?\\b",
+  walk_in_closet       = "\\b(vestier|walk(?:-|\\s*)in\\s*closet)\\b",
+  vista                = "\\b(vista|panor[aá]mica)\\b",
+  exterior_interior    = "\\b(exterior|interior|esquinero|esquina)\\b",
+  estrato              = "\\bestrato\\s*[1-6]\\b"
+)
+
+# --- 3) Función: construir dummies desde texto ---
+add_text_flags <- function(df, patterns = attr_patterns) {
+  stopifnot(all(c("title","description") %in% names(df)))
+  txt <- normalize_text(paste(df$title, df$description))
+  out <- df
+  for (nm in names(patterns)) {
+    rx <- stringr::regex(patterns[[nm]], ignore_case = TRUE)
+    out[[paste0("has_", nm)]] <- as.integer(stringr::str_detect(txt, rx))
+  }
+  out
+}
+
+# --- 4) Aplica procesamiento a train/test ---
+train_txt <- add_text_flags(train)
+test_txt  <- add_text_flags(test)
+
+# --- 5) Evaluación univariada vs price en TRAIN (cobertura, efecto, %Δ, eta²) ---
+target <- "price"
+
+score_one_attr <- function(df, attr_col, target = "price") {
+  # grupos por flag
+  g <- df |>
+    dplyr::summarise(
+      mean1 = mean(.data[[target]][.data[[attr_col]] == 1], na.rm = TRUE),
+      mean0 = mean(.data[[target]][.data[[attr_col]] == 0], na.rm = TRUE),
+      n1    = sum(.data[[attr_col]] == 1, na.rm = TRUE),
+      n0    = sum(.data[[attr_col]] == 0, na.rm = TRUE),
+      .groups = "drop"
+    )
+  effect   <- g$mean1 - g$mean0
+  pct_diff <- ifelse(is.finite(g$mean0) && g$mean0 != 0, effect / g$mean0, NA_real_)
+  # eta² (varianza explicada por 2 grupos)
+  grand    <- mean(df[[target]], na.rm = TRUE)
+  ss_between <- g$n1 * (g$mean1 - grand)^2 + g$n0 * (g$mean0 - grand)^2
+  ss_total   <- sum((df[[target]] - grand)^2, na.rm = TRUE)
+  eta2 <- ifelse(ss_total > 0, ss_between / ss_total, 0)
+  tibble(
+    attribute = attr_col,
+    support_1 = g$n1,
+    rate_1    = (g$n1)/(g$n1 + g$n0),
+    mean_price_1 = g$mean1,
+    mean_price_0 = g$mean0,
+    mean_diff    = effect,
+    pct_diff     = pct_diff,
+    eta2         = eta2
+  )
+}
+
+flag_cols <- names(train_txt) |> (\(v) v[stringr::str_starts(v, "has_")])()
+stats_tbl <- purrr::map_dfr(flag_cols, ~score_one_attr(train_txt, .x, target = target))
+
+# Ranking: cobertura mínima, tamaño de efecto y eta² (ajusta pesos si quieres)
+min_rate <- 0.03  # >= 3% de menciones
+ranked <- stats_tbl |>
+  mutate(rank_score = eta2 * 0.5 + abs(pct_diff) * 0.3 + rate_1 * 0.2) |>
+  filter(rate_1 >= min_rate) |>
+  arrange(desc(rank_score))
+
+# --- 6) Reducir redundancia entre dummies (phi) y elegir TOP-4 ---
+phi_bin <- function(a, b) {
+  pa <- mean(a); pb <- mean(b)
+  cov <- mean(a*b) - pa*pb
+  denom <- sqrt(pa*(1-pa)*pb*(1-pb))
+  if (!is.finite(denom) || denom == 0) return(0)
+  cov/denom
+}
+
+# matriz phi en candidatas
+cand <- ranked$attribute
+Phi <- matrix(NA_real_, nrow = length(cand), ncol = length(cand), dimnames = list(cand, cand))
+for (i in seq_along(cand)) {
+  for (j in seq_along(cand)) {
+    if (i == j) { Phi[i, j] <- 1; next }
+    a <- as.integer(train_txt[[cand[i]]]); b <- as.integer(train_txt[[cand[j]]])
+    Phi[i, j] <- phi_bin(a, b)
+  }
+}
+
+picked <- character(0)
+for (nm in ranked$attribute) {
+  if (length(picked) == 4) break
+  ok <- all(abs(Phi[nm, picked, drop = FALSE]) <= 0.8)
+  if (ok) picked <- c(picked, nm)
+}
+
+top4 <- picked
+top4
+#> vector con los 4 "has_*" seleccionados automáticamente
+
+# --- 7) Crear SOLO esas 4 dummies finales coherentes en train/test ---
+add_top4 <- function(df, final_names) {
+  # Asegura columnas aunque alguna no aparezca en test
+  for (nm in final_names) if (!nm %in% names(df)) df[[nm]] <- 0L
+  df |>
+    mutate(across(all_of(final_names), ~as.integer(.))) 
+}
+
+train_ready <- add_top4(train_txt, top4)
+test_ready  <- add_top4(test_txt,  top4)
+
+# --- 8) Pequeñas tablas para el informe (justificación reproducible) ---
+justificacion <- ranked |>
+  filter(attribute %in% top4) |>
+  select(attribute, support_1, rate_1, mean_price_1, mean_price_0, mean_diff, pct_diff, eta2, rank_score)
+
+justificacion |>
+  arrange(desc(rank_score)) |>
+  mutate(pct_diff = scales::percent(pct_diff, accuracy = 0.1),
+         rate_1   = scales::percent(rate_1, accuracy = 0.1)) |>
+  select(attribute, rate_1, mean_price_1, mean_price_0, pct_diff, eta2)
+
+```
+
+
 # Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
 ```{r}
 
@@ -260,6 +414,7 @@ test_ready <- add_text_dummies(test)
 
 # (Opcional) ver cobertura de cada dummie en train
 colMeans(dplyr::select(train_ready, starts_with("has_")))
+colMeans(dplyr::select(test_ready, starts_with("has_")))
 
 ```
 
