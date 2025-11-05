@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, recipes, ranger
 )
 ```
 
@@ -415,6 +415,92 @@ test_ready <- add_text_dummies(test)
 # (Opcional) ver cobertura de cada dummie en train
 colMeans(dplyr::select(train_ready, starts_with("has_")))
 colMeans(dplyr::select(test_ready, starts_with("has_")))
+
+```
+
+```{r}
+
+# --- 2) Flags de NA en numéricas clave ---
+na_flags <- c("surface_total","surface_covered","rooms","bathrooms")
+for (c in na_flags) {
+  if (c %in% names(train)) train[[paste0("isna_", c)]] <- as.integer(is.na(train[[c]]))
+  if (c %in% names(test))  test [[paste0("isna_", c)]] <- as.integer(is.na(test [[c]]))
+}
+
+# --- 3) Definición de columnas numéricas y de agrupación ---
+num_cols <- c("bathrooms","bedrooms","lat","lon","rooms","surface_total","surface_covered","year","month")
+grp_cols <- c("city","property_type")
+
+# Asegurar tipos para el join
+train <- train %>% mutate(across(all_of(grp_cols), as.character))
+test  <- test  %>% mutate(across(all_of(grp_cols), as.character))
+
+# --- 4) FIT de medianas (USAR SOLO TRAIN) ---
+# Medianas por grupo
+med_by_grp <- train %>%
+  group_by(across(all_of(grp_cols))) %>%
+  summarise(across(all_of(num_cols), ~median(.x, na.rm = TRUE)), .groups = "drop") %>%
+  rename_with(~ paste0(.x, "_medgrp"), all_of(num_cols))
+
+# Medianas globales (fallback)
+med_global <- train %>%
+  summarise(across(all_of(num_cols), ~median(.x, na.rm = TRUE))) %>%
+  tidyr::pivot_longer(everything(), names_to = "var", values_to = "med")
+
+# --- 5) APLICAR imputación a train y test con fallback global ---
+impute_with_grp_then_global <- function(df){
+  df %>%
+    left_join(med_by_grp, by = setNames(grp_cols, grp_cols)) %>%
+    mutate(across(all_of(num_cols), ~coalesce(.x, get(paste0(cur_column(), "_medgrp"))))) %>%
+    select(-ends_with("_medgrp")) %>%
+    {
+      out <- .
+      for (v in num_cols) {
+        mg <- med_global$med[med_global$var == v]
+        out[[v]] <- ifelse(is.na(out[[v]]), mg, out[[v]])
+      }
+      out
+    }
+}
+train_imp <- impute_with_grp_then_global(train)
+test_imp  <- impute_with_grp_then_global(test)
+
+# --- 6) Receta: quitar texto crudo, codificar categóricas y preparar matrices ---
+target <- "price"
+rec <- recipe(price ~ ., data = train_imp) %>%
+  update_role(property_id, new_role = "id") %>%
+  step_rm(title, description) %>%
+  step_other(all_nominal_predictors(), threshold = 0.005) %>%  # agrupa categorías raras
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+rec_prep <- prep(rec, training = train_imp, verbose = FALSE)
+X_train  <- bake(rec_prep, new_data = NULL)
+X_test   <- bake(rec_prep, new_data = test_imp)
+
+# --- 7) Entrenar Random Forest (ranger) ---
+rf <- ranger(
+  formula = price ~ . - property_id,
+  data    = X_train,
+  num.trees = 800,
+  mtry       = floor(sqrt(ncol(X_train) - 2)),
+  min.node.size = 5,
+  importance = "impurity",
+  seed = 123
+)
+
+cat("\nOOB RMSE (RF con imputación):", round(sqrt(rf$prediction.error), 2), "\n")
+
+# --- 8) Predicción y archivo para Kaggle ---
+pred_test <- predict(rf, data = X_test)$predictions
+submission <- tibble(property_id = X_test$property_id, price = round(pmax(pred_test, 0)))
+readr::write_csv(submission, "submission_rf_imputacion.csv")
+
+# (Opcional) Importancias top 20
+imp <- sort(rf$variable.importance, decreasing = TRUE)
+print(head(imp, 20))
+
 
 ```
 
