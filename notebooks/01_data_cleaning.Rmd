@@ -6,40 +6,68 @@ date: "2025-11-23"
 output: html_document
 ---
 
+# 1. DATOS. 
+
+##Librerías
+
 ```{r setup, include=FALSE}
+
+# Instalar y cargar pacman (gestor de paquetes)
 knitr::opts_chunk$set(echo = TRUE)
 
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here
 )
+
+# Verificar paquetes cargados
+pacman::p_loaded()
 ```
 
-# 1. Limpieza de datos
-```{r}
-test <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/test.csv")
-train <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/train.csv")
 
+## Cargar de bases de datos
+```{r}
+#Base de datos test
+test <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/test.csv")
+##Base de datos train
+train <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/train.csv")
+```
+
+
+## Limpieza de datos
+
+```{r}
+#Configuración inicial
+
+#Establecemos visuales minimalistas
 theme_set(theme_minimal())
 
-# Opcional: normalizar nombres a snake_case
+# Normalizar nombres a snake_case
 train <- janitor::clean_names(train)
 test  <- janitor::clean_names(test)
 
-# Define tu objetivo (ajusta si se llama distinto)
+# Objetivo a predecir
 target <- "price"
 
-# ===============================
-# 2) Estructura y diferencias básicas
-# ===============================
-cat("\nDimensiones:\n")
-cat("train: ", paste(dim(train), collapse=" x "), "\n")
-cat("test : ", paste(dim(test),  collapse=" x "), "\n")
+```
 
+
+```{r}
+
+# Estructura y diferencias básicas entre train y test
+
+#diferencias y similutes
+cat("\nDimensiones:\n")
+cat("train: ", paste(dim(train), collapse=" x "), "\n") #38644 observaciones
+cat("test : ", paste(dim(test),  collapse=" x "), "\n") #10286 observaciones
+#Tienen las misma cantidad de variables
+
+#Reviamos nombres
 train_cols <- names(train)
 test_cols  <- names(test)
 
+#Diferencia en variables
 cols_common        <- intersect(train_cols, test_cols)
 cols_train_only    <- setdiff(train_cols, test_cols)
 cols_test_only     <- setdiff(test_cols, train_cols)
@@ -49,26 +77,37 @@ cat("\nColumnas SOLO en train (excluyendo target):\n")
 print(setdiff(cols_train_only, target))
 cat("\nColumnas SOLO en test:\n")
 print(cols_test_only)
+#Todas las columnas son comunes
 
 cat("\nPrimeras columnas comunes:\n")
 print(head(cols_common, 20))
 
-# ===============================
-# 3) Tipos de datos y vistazo
-# ===============================
+
+# Tipos de datos y vistazo
+
 cat("\nGlimpse train:\n")
 glimpse(train)
 cat("\nGlimpse test:\n")
 glimpse(test)
+#Pice vacio en test
 
-# Resumen amigable
+# Resumen estadístico básico de train
 cat("\nResumen SKIM (train):\n")
 skimr::skim(train)
 
-# ===============================
-# 4) Chequeos de duplicados
-# ===============================
-# Si tienes un id (p.ej. property_id) cambia aquí:
+#6 variables caracter
+#10 variables numericas
+#Faltantes en m2 total, m2 cubierta, cuartos y baños.
+
+str(train)
+```
+
+
+## Revisamos duplicados 
+
+```{r}
+
+# Duplicados en ID
 id_col <- dplyr::case_when(
   "property_id" %in% names(train) ~ "property_id",
   TRUE ~ NA_character_
@@ -79,52 +118,169 @@ if (!is.na(id_col)) {
   dup_test  <- test  %>% count(.data[[id_col]]) %>% filter(n > 1) %>% nrow()
   cat("\nDuplicados por ID en train:", dup_train, " | en test:", dup_test, "\n")
 } else {
-  cat("\n(No se detectó columna ID típica; se revisan duplicados de filas completas)\n")
+  cat("\n(No hay duplicados)\n")
   cat("Filas duplicadas en train:", sum(duplicated(train)), "\n")
   cat("Filas duplicadas en test :", sum(duplicated(test)),  "\n")
 }
 
-# ===============================
-# 5) Faltantes (NA) y comparaciones
-# ===============================
-cat("\nFaltantes por variable (train):\n")
-miss_train <- naniar::miss_var_summary(train) %>% rename(n_miss_train = n_miss, pct_miss_train = pct_miss)
-print(head(miss_train, 15))
+getwd()
+```
+#Revisón exaustiva de Na
+```{r}
 
-cat("\nFaltantes por variable (test):\n")
-miss_test <- naniar::miss_var_summary(test) %>% rename(n_miss_test = n_miss, pct_miss_test = pct_miss)
-print(head(miss_test, 15))
 
-# Comparación NA train vs test (solo columnas comunes)
-miss_compare <- full_join(miss_train %>% rename(variable = variable),
-                          miss_test  %>% rename(variable = variable),
-                          by = "variable") %>%
-  mutate(across(starts_with("pct_miss"), ~replace_na(., 0))) %>%
-  arrange(desc(abs(pct_miss_train - pct_miss_test)))
+# Calcular % de faltantes en TRAIN hogares
+faltantes_train <- train %>%
+  summarise(across(everything(), ~mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Porcentaje_NA") %>%
+  mutate(Base = "Entrenamiento")
 
-cat("\nTop 15 diferencias de faltantes (train vs test):\n")
-print(head(miss_compare, 15))
+# Calcular % de faltantes en TEST hogares
+faltantes_test <- test %>%
+  summarise(across(everything(), ~mean(is.na(.)) * 100)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Porcentaje_NA") %>%
+  mutate(Base = "Prueba")
 
-# Visual rápido de NA
-naniar::vis_miss(train %>% select(all_of(cols_common_nontgt))) +
-  ggtitle("Mapa de faltantes - TRAIN (solo columnas comunes sin target)")
+# Unir ambas bases
+faltantes_comp <- bind_rows(faltantes_train, faltantes_test)
 
-naniar::vis_miss(test %>% select(all_of(cols_common_nontgt))) +
-  ggtitle("Mapa de faltantes - TEST (solo columnas comunes sin target)")
 
-DataExplorer::plot_missing(train %>% select(all_of(cols_common_nontgt))) +
-  ggtitle("Proporción de faltantes por variable - TRAIN")
+# Gráfico comparativo con leyenda inferior
+grafico_faltantes <- ggplot(faltantes_comp, aes(x = Variable, y = Porcentaje_NA, fill = Base)) +
+  geom_bar(stat = "identity", position = "dodge", color = "gray30") +
+  geom_text(
+    aes(label = paste0(round(Porcentaje_NA, 2), "%")),
+    position = position_dodge(width = 0.9),
+    vjust = -0.3, size = 3
+  ) +
+  coord_flip() +
+  labs(
+    title = "Comparación de % de valores faltantes por variable\nTrain vs Test",
+    x = "Variable",
+    y = "% de valores faltantes",
+    fill = "Base de datos"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom",              # 🔹 Mueve la leyenda abajo
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  ) +
+  scale_fill_manual(
+    values = c("Entrenamiento" = "lightyellow4", "Prueba" = "#FFFF00")
+  )
 
-DataExplorer::plot_missing(test %>% select(all_of(cols_common_nontgt))) +
-  ggtitle("Proporción de faltantes por variable - TEST")
 
-# ===============================
-# 6) Detectar numéricas vs categóricas
-# ===============================
-is_num <- function(x) is.numeric(x) || inherits(x, c("integer","numeric","double"))
+
+#Gardar Gráfica
+
+root_dir <- here::here()
+
+# Crea subrutas relativas al proyecto
+path_outputs <- file.path(root_dir, "outputs")
+path_figures <- file.path(path_outputs, "figures")
+
+#PDF
+ggsave(
+  filename = file.path(path_figures, "Faltantes_Trains.pdf"),
+  plot = grafico_faltantes,
+  width = 10, height = 6
+)
+
+#PNG
+ggsave(
+  filename = file.path(path_figures, "Faltantes_Trains.png"),
+  plot = grafico_faltantes,
+  width = 10, height = 6,
+  dpi = 300
+)
+
+# Mostrar en pantalla
+print(grafico_faltantes)
+
+
+
+```
+## Revisión outliers
+
+```{r}
+
+# Seleccionar variables numérica
+vars_outliers <- train %>%
+  select(where(is.numeric)) %>%
+  select(-any_of(c("price", "year", "lon", "lat", "month")))
+
+#⃣ Pasar a formato largo
+vars_long <- vars_outliers %>%
+  pivot_longer(cols = everything(),
+               names_to = "Variable",
+               values_to = "Valor")
+
+#  Graficar boxplots 
+grafico_outliers <- ggplot(vars_long, aes(x = Variable, y = Valor)) +
+  geom_boxplot(fill = "#87CEFA", color = "gray30", outlier.colour = "red", alpha = 0.6, width = 0.6) +
+  coord_flip() +
+  labs(
+    title = "Detección de outliers",
+    x = "Variable",
+    y = "Valor"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 12, margin = margin(r = 10)),
+    axis.text.y = element_text(size = 11),
+    axis.text.x = element_text(size = 10),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  )
+
+
+print(grafico_outliers)
+
+#Gurdamos gráfica
+
+# Ruta dinámica
+root_dir <- here::here()
+path_outputs <- file.path(root_dir, "outputs")
+path_figures <- file.path(path_outputs, "figures")
+dir.create(path_figures, recursive = TRUE, showWarnings = FALSE)
+
+
+#PDF
+ggsave(
+  filename = file.path(path_figures, "Outliers.pdf"),
+  plot = grafico_outliers,
+  width = 9, height = 12, dpi = 300
+)
+#PNG
+ggsave(
+  filename = file.path(path_figures, "Outliers.png"),
+  plot = grafico_outliers,
+  width = 9, height = 12, dpi = 300
+)
+
+#Revismos si hay observaciones donde el cubierto sea mayor que el total
+train %>%
+  filter(surface_covered > surface_total) %>%
+  select(surface_total, surface_covered)
+```
+
+
+```{r}
+
+# Detectar numéricas vs categóricas
+
+numericas <- function(x) is.numeric(x) || inherits(x, c("integer","numeric","double"))
 num_cols <- train %>%
   select(any_of(cols_common_nontgt)) %>%
-  select(where(is_num)) %>% names()
+  select(where(numericas)) %>% names()
 
 cat_cols <- setdiff(cols_common_nontgt, num_cols)
 
