@@ -1063,7 +1063,7 @@ procesar_distancias <- function(df) {
         levels = c("muy_cerca", "cerca_optima", "media", "lejos")
       ))
     )
-}
+} 
 
 # Aplicar a train y test
 train_osm <- procesar_distancias(train_ready_osm)
