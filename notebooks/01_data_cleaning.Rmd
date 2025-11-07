@@ -721,17 +721,42 @@ get_poi_all <- function(points, polys, lines, key, values) {
 
 # Crear lista de puntos de interés combinando todas las capas
 pois_list <- list(
-  parques = get_poi_all(points_bogota, polys_bogota, lines_bogota,
-                        key = "leisure", values = "park"),
-  colegios = get_poi_all(points_bogota, polys_bogota, lines_bogota,
-                         key = "amenity", values = "school"),
-  restaurantes = get_poi_all(points_bogota, polys_bogota, lines_bogota,
-                             key = "amenity", values = "restaurant"),
-  autopistas = get_poi_all(points_bogota, polys_bogota, lines_bogota,
-                           key = "highway", values = c("motorway", "trunk", "primary")),
-  centros_comerciales = get_poi_all(points_bogota, polys_bogota, lines_bogota,
-                                    key = "shop", values = "mall")
+  # Parques y zonas de recreo (incluye golf)
+  parques = get_poi_all(
+    points_bogota, polys_bogota, lines_bogota,
+    key = "leisure",
+    values = c("park", "garden", "recreation_ground", "playground", "golf_course")
+  ),
+  
+  # Colegios, jardines infantiles, universidades
+  colegios = get_poi_all(
+    points_bogota, polys_bogota, lines_bogota,
+    key = "amenity",
+    values = c("school", "kindergarten", "college", "university")
+  ),
+  
+  # Restaurantes, cafeterías y comida rápida
+  restaurantes = get_poi_all(
+    points_bogota, polys_bogota, lines_bogota,
+    key = "amenity",
+    values = c("restaurant", "fast_food", "cafe")
+  ),
+  
+  # Autopistas y vías principales
+  autopistas = get_poi_all(
+    points_bogota, polys_bogota, lines_bogota,
+    key = "highway",
+    values = c("motorway", "trunk", "primary")
+  ),
+  
+  # Centros comerciales y supermercados grandes
+  centros_comerciales = get_poi_all(
+    points_bogota, polys_bogota, lines_bogota,
+    key = "shop",
+    values = c("mall", "supermarket")
+  )
 )
+
 
 # Eliminar vacíos (NULL o sin filas)
 pois_list <- purrr::discard(pois_list, ~is.null(.) || nrow(.) == 0)
@@ -979,5 +1004,75 @@ ggsave("outputs/figures/mapa_train_pois_bogota.png", m_poi , width = 8, height =
 
 
 m_poi
+```
+## Transformaciones a las variables espaciales
+
+El objetivo de estas transformaciones es capturar cómo la proximidad a ciertos puntos de interés influye en el valor de una vivienda, diferenciando entre efectos positivos y negativos según la distancia.
+
+- Autopistas: vivir justo al lado reduce el valor (ruido, contaminación), pero estar cerca —sin estar expuesto— puede ser positivo por accesibilidad.
+
+- Parques y zonas verdes: mayor valor cuanto más cerca, aunque con rendimientos decrecientes, por eso se usa una transformación logarítmica.
+
+- Colegios y jardines: un punto óptimo entre 100 m y 500 m, balanceando conveniencia y externalidades (ruido, tráfico).
+
+- Centros comerciales: cercanía moderada es deseable, pero el exceso de tráfico y ruido reduce el atractivo si se está demasiado cerca.
+
+- Restaurantes y cafeterías: capturan vitalidad urbana; la cercanía tiende a ser positiva.
+
+- Estaciones de transporte público: cercanía razonable mejora accesibilidad, pero el exceso de proximidad puede implicar congestión.
+```{r}
+
+# Transformaciones y categorizaciones de variables espaciales
+
+procesar_distancias <- function(df) {
+  df %>%
+    mutate(
+      # Parques y zonas verdes (incluye golf)
+      dist_parques_log = log1p(dist_parques),
+
+      #  Colegios y jardines 
+      dist_colegios2 = dist_colegios^2,
+      dist_colegios_cat = case_when(
+        dist_colegios < 50 ~ "muy_cerca",
+        dist_colegios <= 500 ~ "cerca_optima",
+        TRUE ~ "lejos"
+      ),
+
+      # Restaurantes, cafeterías y comida rápida
+      dist_restaurantes_log = log1p(dist_restaurantes),
+
+      #  Centros comerciale
+      dist_malls_cat = case_when(
+        dist_centros_comerciales <= 1000 ~ "cerca",
+        dist_centros_comerciales <= 3000 ~ "media",
+        TRUE ~ "lejos"
+      ),
+
+      # Autopistas
+      dist_autopistas2 = dist_autopistas^2,
+      dist_autopistas_cat = case_when(
+        dist_autopistas < 50 ~ "muy_cerca",
+        dist_autopistas >= 50 & dist_autopistas <= 500 ~ "cerca_optima",
+        dist_autopistas > 500 ~ "lejos",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    mutate(
+      # Convertir categóricas en factor con orden lógico
+      across(ends_with("_cat"), ~factor(., 
+        levels = c("muy_cerca", "cerca_optima", "media", "lejos")
+      ))
+    )
+}
+
+# Aplicar a train y test
+train_osm <- procesar_distancias(train_ready_osm)
+test_osm <- procesar_distancias(test_ready_osm)
+
+# Guardar versiones actualizadas
+saveRDS(train_osm, "outputs/train_sf_distancias_transformadas.rds")
+saveRDS(test_osm,  "outputs/test_sf_distancias_transformadas.rds")
+
+
 ```
 
