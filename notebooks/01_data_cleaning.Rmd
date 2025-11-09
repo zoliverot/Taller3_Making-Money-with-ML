@@ -1076,3 +1076,144 @@ saveRDS(test_osm,  "outputs/test_sf_distancias_transformadas.rds")
 
 ```
 
+##Inclusión de estrato socioeconomico
+
+```{r}
+# Este bloque ejecuta un proceso de enriquecimiento de datos en tres pasos:
+# 1. Carga las tres fuentes de datos: Lotes (geometría) y Estrato (datos).
+# 2. Las une usando un código de identificación común (la "llave").
+# 3. Une espacialmente el resultado final con las viviendas.
+# 4. Realiza la unión espacial para asignar el estrato a cada vivienda.
+# 5. Actualiza las bases finales y verifica el resultado.
+
+
+# Definir rutas de salida para archivos procesados
+train_rds_estrato <- "outputs/train_ready_osm_estrato.rds"
+test_rds_estrato  <- "outputs/test_ready_osm_estrato.rds"
+
+#Para no volver a procesar, si existen los rds, se cargan con el siguiente comando
+
+if (file.exists(train_rds_estrato) & file.exists(test_rds_estrato)) {
+  message("Archivos .RDS encontrados. Cargando datos procesados...")
+  
+  train_ready_osm_estrato <- readRDS(train_rds_estrato)
+  test_ready_osm_estrato  <- readRDS(test_rds_estrato)
+  
+} else {
+ message("No se encontraron .RDS. ")
+
+  
+
+# --- 1. Cargar Archivos Fuente ---
+# Para mayor robustez, se recomienda tener estos archivos en la carpeta del proyecto.
+ruta_gpkg <- "C:/Users/User/OneDrive/Documents/GitHub/Taller3_Making Money with ML/data/external/LOTE.gpkg"
+ruta_estrato_csv <- "C:/Users/User/OneDrive/Documents/GitHub/Taller3_Making Money with ML/data/external/estrato.csv"
+
+if (!file.exists(ruta_gpkg)) stop("¡Archivo LOTE.gpkg no encontrado!")
+lotes_sf <- sf::st_read(ruta_gpkg)
+message("GeoPackage 'LOTE.gpkg' cargado.")
+
+if (!file.exists(ruta_estrato_csv)) stop("¡Archivo 'estrato.csv' no encontrado!")
+estrato_csv_df <- readr::read_csv(ruta_estrato_csv)
+message("Tabla de estrato 'estrato.csv' cargada.")
+
+
+# --- 2. Preparar y Unir Lotes con Estratos ---
+
+lotes_preparado_sf <- lotes_sf %>%
+  dplyr::rename(codigo_lote_llave = LOTCODIGO) %>%
+  dplyr::mutate(codigo_lote_llave = as.character(codigo_lote_llave))
+
+estrato_preparado_df <- estrato_csv_df %>%
+  dplyr::rename(codigo_lote_llave = ESOCLOTE) %>%
+  dplyr::mutate(codigo_lote_llave = as.character(codigo_lote_llave)) %>%
+  # Paso CRUCIAL: Eliminamos lotes duplicados para asegurar una unión 1 a 1.
+  dplyr::distinct(codigo_lote_llave, .keep_all = TRUE)
+
+# Realizamos la unión (merge)
+message("Uniendo Lotes y Estratos por el código del lote...")
+lotes_con_estrato_sf <- lotes_preparado_sf %>%
+  dplyr::left_join(estrato_preparado_df, by = "codigo_lote_llave") %>%
+  # Seleccionamos solo las columnas que necesitamos para el paso final.
+  dplyr::select(estrato = ESOESTRATO, geom) %>%
+  # Filtramos lotes que no lograron obtener un estrato
+  dplyr::filter(!is.na(estrato)) %>%
+  dplyr::mutate(estrato = as.factor(estrato))
+message("¡Unión completada!")
+
+
+# --- 3. Preparar Bases de Viviendas para Unión Espacial ---
+
+# Aseguramos que las bases de viviendas (train/test) sean objetos 'sf'
+# y tengan el sistema de coordenadas correcto.
+message("\nPreparando bases de datos de viviendas...")
+
+# Convertir train_ready_osm a 'sf'
+if (!inherits(train_ready_osm, "sf")) {
+  train_sf <- sf::st_as_sf(train_ready_osm, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+} else {
+  train_sf <- train_ready_osm
+}
+
+# Convertir test_ready_osm a 'sf'
+if (!inherits(test_ready_osm, "sf")) {
+  test_sf <- sf::st_as_sf(test_ready_osm, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+} else {
+  test_sf <- test_ready_osm
+}
+
+# Unificar TODOS los CRS a EPSG:3116 para la unión espacial.
+message("Unificando Sistemas de Coordenadas (CRS) a EPSG:3116...")
+lotes_con_estrato_sf <- sf::st_transform(lotes_con_estrato_sf, crs = 3116)
+train_sf <- sf::st_transform(train_sf, crs = 3116)
+test_sf  <- sf::st_transform(test_sf, crs = 3116)
+message("¡Todos los CRS unificados!")
+
+
+# --- 4. Realizar la Unión Espacial ---
+# Asignamos el estrato a cada vivienda según su ubicación.
+message("\nRealizando unión espacial con la base de entrenamiento...")
+train_final_sf <- sf::st_join(train_sf, lotes_con_estrato_sf, join = st_intersects, left = TRUE)
+
+message("Realizando unión espacial con la base de prueba...")
+test_final_sf  <- sf::st_join(test_sf, lotes_con_estrato_sf, join = st_intersects, left = TRUE)
+
+
+# --- 5. Verificación y Finalización ---
+message("\n--- Resultados de la Unión ---")
+cat("Estratos asignados en TRAIN:", sum(!is.na(train_final_sf$estrato)), "de", nrow(train_final_sf), "\n")
+cat("Estratos asignados en TEST:",  sum(!is.na(test_final_sf$estrato)),  "de", nrow(test_final_sf),  "\n")
+
+# Actualizamos nuestras bases de datos finales.
+# Esta vez nos aseguramos de no duplicar columnas y de manejar la geometría correctamente.
+train_ready_osm_estrato <- sf::st_drop_geometry(train_final_sf)
+test_ready_osm_estrato  <- sf::st_drop_geometry(test_final_sf)
+
+# Verificamos que la columna 'estrato' fue añadida
+glimpse(train_ready_osm_estrato)
+
+message("\n¡PROCESO COMPLETADO! La columna 'estrato' ha sido añadida a 'train_ready_osm' y 'test_ready_osm'.")
+
+# --- 6. (Opcional) Guardar resultados y visualizar ---
+dir.create("outputs", showWarnings = FALSE)
+readr::write_csv(train_ready_osm_estrato, "outputs/train_final_con_estrato.csv")
+message("\nBase de entrenamiento final guardada en la carpeta 'outputs'.")
+
+# Gráfico de validación visual
+ggplot() +
+  geom_sf(data = lotes_con_estrato_sf, aes(fill = estrato), color = NA, alpha = 0.5) +
+  geom_sf(data = head(train_sf, 1000), color = "black", size = 0.5) + # Graficamos solo 1000 puntos para que sea rápido
+  scale_fill_viridis_d(name = "Estrato") +
+  theme_minimal() +
+  labs(title = "Validación Visual de Estratos y Viviendas",
+       subtitle = "Polígonos = Lotes con estrato, Puntos = Viviendas (muestra)")
+
+
+# Exportar dataset
+
+
+  saveRDS(train_ready_osm_estrato, train_rds_estrato)
+  saveRDS(test_ready_osm_estrato,  test_rds_estrato)
+}
+##
+```
