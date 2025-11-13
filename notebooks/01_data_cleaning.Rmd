@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels
 )
 
 
@@ -28,7 +28,7 @@ pacman::p_loaded()
 ```
 
 
-## Cargar de bases de datos
+## Cargar  bases de datos principales
 ```{r}
 #Base de datos test
 test <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/test.csv")
@@ -54,6 +54,7 @@ target <- "price"
 
 ```
 
+## Exploración  y manipulación de datos principales 
 
 ```{r}
 
@@ -170,7 +171,8 @@ if (!is.na(id_col)) {
 
 getwd()
 ```
-#Revisón exaustiva de Na
+#Revisón de NA
+
 ```{r}
 
 
@@ -320,258 +322,15 @@ train %>%
 ## Variables nuevas a partir de texto
 
 ```{r}
-
-# Normalizador de texto - función 
-texto_normal <- function(x) {
-  x %>%
-    tidyr::replace_na("") %>%
-    stringi::stri_trans_general("Latin-ASCII") %>% # quita tildes
-    tolower() %>%
-    stringr::str_squish()
-}
-
-# Diccionario de atributos (regex) para dummies desde title+description 
-# Puedes ajustar/expandir vocabulario según tu mercado
-attr_patterns <- list(
-  ubic_parque          = "\\bparques?\\b(?!adero)",                             # parque, no parqueadero
-  parqueadero_garaje   = "\\b(parqueadero|garaje|estacionamiento)s?\\b",
-  transporte_metro_tm  = "\\b(metro|transmilenio|sitp|subte|estacion|paradero)\\b",
-  colegio_universidad  = "\\b(colegios?|universidades?|jardin(?:es)? infantil(?:es)?)\\b",
-  salud_hospital       = "\\b(hospital(es)?|clinica(s)?|centro(s)? medico(s)?)\\b",
-  centro_comercial     = "\\b(centro(s)? comercial(es)?)\\b",
-  supermercado         = "\\b(supermercado(s)?|tienda(s)?|exito|carulla|jumbo|olimpica|d1|ara)\\b",
-  seguridad            = "\\b(vigilancia|porteri[ai]|seguridad|camaras?)\\b",
-  amenities            = "\\b(piscina|gimnasio|bbq|sal[oó]n social|zona social|zona infantil)\\b",
-  ascensor             = "\\bascensor(es)?\\b",
-  balcon               = "\\bbalcon(es)?\\b",
-  terraza              = "\\bterraza(s)?\\b",
-  remodelado           = "\\b(remodelad[oa]s?|remodelaci[oó]n)\\b",
-  cocina_integral      = "\\bcocina integral\\b",
-  iluminacion          = "\\biluminaci[oó]n\\b",
-  ventilacion          = "\\bventilaci[oó]n\\b",
-  patio                = "\\bpatio(s)?\\b",
-  estudio              = "\\bestudio(s)?\\b",
-  deposito             = "\\bdepo[si]t[oó]s?\\b|\\bbaulera(s)?\\b|\\btrastero(s)?\\b",
-  chimenea             = "\\bchimenea(s)?\\b",
-  walk_in_closet       = "\\b(vestier|walk(?:-|\\s*)in\\s*closet)\\b",
-  vista                = "\\b(vista|panor[aá]mica)\\b",
-  exterior_interior    = "\\b(exterior|interior|esquinero|esquina)\\b",
-  estrato              = "\\bestrato\\s*[1-6]\\b"
-)
-
-# --- 3) Función: construir dummies desde texto ---
-add_text_flags <- function(df, patterns = attr_patterns) {
-  stopifnot(all(c("title","description") %in% names(df)))
-  txt <- texto_normal(paste(df$title, df$description))
-  out <- df
-  for (nm in names(patterns)) {
-    rx <- stringr::regex(patterns[[nm]], ignore_case = TRUE)
-    out[[paste0("has_", nm)]] <- as.integer(stringr::str_detect(txt, rx))
-  }
-  out
-}
-
-# --- 4) Aplica procesamiento a train/test ---
-train_txt <- add_text_flags(train)
-test_txt  <- add_text_flags(test)
-
-# --- 5) Evaluación univariada vs price en TRAIN (cobertura, efecto, %Δ, eta²) ---
-target <- "price"
-
-score_one_attr <- function(df, attr_col, target = "price") {
-  # grupos por flag
-  g <- df |>
-    dplyr::summarise(
-      mean1 = mean(.data[[target]][.data[[attr_col]] == 1], na.rm = TRUE),
-      mean0 = mean(.data[[target]][.data[[attr_col]] == 0], na.rm = TRUE),
-      n1    = sum(.data[[attr_col]] == 1, na.rm = TRUE),
-      n0    = sum(.data[[attr_col]] == 0, na.rm = TRUE),
-      .groups = "drop"
-    )
-  effect   <- g$mean1 - g$mean0
-  pct_diff <- ifelse(is.finite(g$mean0) && g$mean0 != 0, effect / g$mean0, NA_real_)
-  # eta² (varianza explicada por 2 grupos)
-  grand    <- mean(df[[target]], na.rm = TRUE)
-  ss_between <- g$n1 * (g$mean1 - grand)^2 + g$n0 * (g$mean0 - grand)^2
-  ss_total   <- sum((df[[target]] - grand)^2, na.rm = TRUE)
-  eta2 <- ifelse(ss_total > 0, ss_between / ss_total, 0)
-  tibble(
-    attribute = attr_col,
-    support_1 = g$n1,
-    rate_1    = (g$n1)/(g$n1 + g$n0),
-    mean_price_1 = g$mean1,
-    mean_price_0 = g$mean0,
-    mean_diff    = effect,
-    pct_diff     = pct_diff,
-    eta2         = eta2
-  )
-}
-
-flag_cols <- names(train_txt) |> (\(v) v[stringr::str_starts(v, "has_")])()
-stats_tbl <- purrr::map_dfr(flag_cols, ~score_one_attr(train_txt, .x, target = target))
-
-# Ranking: cobertura mínima, tamaño de efecto y eta² (ajusta pesos si quieres)
-min_rate <- 0.03  # >= 3% de menciones
-ranked <- stats_tbl |>
-  mutate(rank_score = eta2 * 0.5 + abs(pct_diff) * 0.3 + rate_1 * 0.2) |>
-  filter(rate_1 >= min_rate) |>
-  arrange(desc(rank_score))
-
-# --- 6) Reducir redundancia entre dummies (phi) y elegir TOP-4 ---
-phi_bin <- function(a, b) {
-  pa <- mean(a); pb <- mean(b)
-  cov <- mean(a*b) - pa*pb
-  denom <- sqrt(pa*(1-pa)*pb*(1-pb))
-  if (!is.finite(denom) || denom == 0) return(0)
-  cov/denom
-}
-
-# matriz phi en candidatas
-cand <- ranked$attribute
-Phi <- matrix(NA_real_, nrow = length(cand), ncol = length(cand), dimnames = list(cand, cand))
-for (i in seq_along(cand)) {
-  for (j in seq_along(cand)) {
-    if (i == j) { Phi[i, j] <- 1; next }
-    a <- as.integer(train_txt[[cand[i]]]); b <- as.integer(train_txt[[cand[j]]])
-    Phi[i, j] <- phi_bin(a, b)
-  }
-}
-
-picked <- character(0)
-for (nm in ranked$attribute) {
-  if (length(picked) == 4) break
-  ok <- all(abs(Phi[nm, picked, drop = FALSE]) <= 0.8)
-  if (ok) picked <- c(picked, nm)
-}
-
-top4 <- picked
-top4
-#> vector con los 4 "has_*" seleccionados automáticamente
-
-# --- 7) Crear SOLO esas 4 dummies finales coherentes en train/test ---
-add_top4 <- function(df, final_names) {
-  # Asegura columnas aunque alguna no aparezca en test
-  for (nm in final_names) if (!nm %in% names(df)) df[[nm]] <- 0L
-  df |>
-    mutate(across(all_of(final_names), ~as.integer(.))) 
-}
-
-train_ready <- add_top4(train_txt, top4)
-test_ready  <- add_top4(test_txt,  top4)
-
-# --- 8) Pequeñas tablas para el informe (justificación reproducible) ---
-justificacion <- ranked |>
-  filter(attribute %in% top4) |>
-  select(attribute, support_1, rate_1, mean_price_1, mean_price_0, mean_diff, pct_diff, eta2, rank_score)
-
-justificacion |>
-  arrange(desc(rank_score)) |>
-  mutate(pct_diff = scales::percent(pct_diff, accuracy = 0.1),
-         rate_1   = scales::percent(rate_1, accuracy = 0.1)) |>
-  select(attribute, rate_1, mean_price_1, mean_price_0, pct_diff, eta2)
-
-```
+library(dplyr)
+library(tidyr)
+library(tidytext)
+library(stringi)
+library(purrr)
 
 
-```{r}
+# Normalizador de texto
 
-
-# ===============================
-# 7) Distribuciones (gráficos sencillos)
-# ===============================
-
-# 7.1 Histograma para cada numérica (train)
-if (length(num_cols) > 0) {
-  train %>%
-    select(all_of(num_cols)) %>%
-    pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
-    ggplot(aes(x = valor)) +
-    geom_histogram(bins = 30) +
-    facet_wrap(~ variable, scales = "free", ncol = 3) +
-    labs(title = "Histogramas (TRAIN)", x = NULL, y = "Frecuencia")
-}
-
-# 7.2 Densidad del target (train), si existe
-if (target %in% names(train)) {
-  # Densidad en escala original
-  ggplot(train, aes(x = .data[[target]])) +
-    geom_density() +
-    labs(title = paste("Densidad de", target, "(TRAIN)"), x = target, y = "Densidad")
-
-  # Densidad en log (opcional)
-  if (all(is.finite(train[[target]]), na.rm = TRUE)) {
-    ggplot(train %>% filter(.data[[target]] > 0), aes(x = log1p(.data[[target]]))) +
-      geom_density() +
-      labs(title = paste("Densidad de log1p(", target, ") (TRAIN)"), x = paste0("log1p(", target, ")"), y = "Densidad")
-  }
-}
-
-# 7.3 Boxplots del target por algunas categóricas (top k categorías más frecuentes)
-top_k_levels <- function(x, k = 12) {
-  forcats::fct_lump_n(x, n = k, other_level = "otros")
-}
-
-if (target %in% names(train) && length(cat_cols) > 0) {
-  for (cc in cat_cols) {
-    p <- train %>%
-      mutate(..grp = top_k_levels(.data[[cc]], k = 12)) %>%
-      ggplot(aes(x = ..grp, y = .data[[target]])) +
-      geom_boxplot(outlier.alpha = 0.2) +
-      coord_flip() +
-      labs(title = paste("Boxplot de", target, "por", cc, "(TRAIN)"),
-           x = cc, y = target)
-    print(p)
-  }
-}
-
-# 7.4 Pares de variables (scatter) para algunas numéricas clave
-pairs_cols <- intersect(num_cols, c("bathrooms","bedrooms","rooms","surface_total","surface_covered","lat","lon","year","month"))
-if (length(pairs_cols) >= 2 && target %in% names(train)) {
-  df_pairs <- train %>% select(all_of(pairs_cols), all_of(target)) %>% drop_na()
-  GGally::ggpairs(df_pairs, columns = 1:length(pairs_cols),
-                  title = "Matriz de pares (subset numérico) - TRAIN")
-}
-
-# ===============================
-# 8) Correlaciones numéricas
-# ===============================
-if (length(num_cols) >= 2) {
-  # correlaciones entre numéricas (train)
-  cormat <- train %>% select(all_of(num_cols)) %>%
-    mutate(across(everything(), as.numeric)) %>%
-    cor(use = "pairwise.complete.obs")
-
-  ggcorrplot::ggcorrplot(cormat, lab = FALSE, type = "lower") +
-    ggtitle("Correlación entre variables numéricas (TRAIN)")
-
-  # correlación con target si numérico
-  if (target %in% names(train) && is.numeric(train[[target]])) {
-    cor_with_target <- train %>%
-      select(all_of(num_cols), all_of(target)) %>%
-      cor(use = "pairwise.complete.obs") %>%
-      as.data.frame() %>%
-      rownames_to_column("variable") %>%
-      select(variable, all_of(target)) %>%
-      arrange(desc(abs(.data[[target]])))
-    cat("\nCorrelación con el target (TRAIN):\n")
-    print(cor_with_target)
-  }
-}
-
-# ===============================
-# 9) Recomendación de columnas a modelar
-# ===============================
-keep_features <- setdiff(cols_common, target)  # lo común menos la y
-cat("\nFeatures a usar (comunes, sin target):\n")
-print(keep_features)
-```
-
-
-
-# Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
-```{r}
-
-# Normaliza: minúsculas, sin tildes, espacios compactados
 texto_normal <- function(x) {
   x %>%
     tidyr::replace_na("") %>%
@@ -580,39 +339,212 @@ texto_normal <- function(x) {
     stringr::str_squish()
 }
 
-# Crea las 4 dummies desde title + description
-add_text_dummies <- function(df) {
-  stopifnot(all(c("title","description") %in% names(df)))
-  
-  txt <- texto_normal(paste(df$title, df$description))
-  
-  # Patrones (regex) — puedes ajustar si quieres ampliar vocabulario
-  rx_parqueadero_garaje <- stringr::regex("\\b(parqueadero|garaje|estacionamiento)s?\\b", ignore_case = TRUE)
-  rx_cocina_integral    <- stringr::regex("\\bcocina integral\\b", ignore_case = TRUE)
-  rx_estudio            <- stringr::regex("\\bestudio(s)?\\b", ignore_case = TRUE)
-  rx_chimenea           <- stringr::regex("\\bchimenea(s)?\\b", ignore_case = TRUE)
-  
-  df %>%
-    mutate(
-      has_parqueadero_garaje = as.integer(stringr::str_detect(txt, rx_parqueadero_garaje)),
-      has_cocina_integral    = as.integer(stringr::str_detect(txt, rx_cocina_integral)),
-      has_estudio            = as.integer(stringr::str_detect(txt, rx_estudio)),
-      has_chimenea           = as.integer(stringr::str_detect(txt, rx_chimenea))
-    )
+
+#  Diccionario
+
+token_diccionario <- list(
+  parqueadero_garaje = c("parqueadero", "garaje", "estacionamiento"),
+  seguridad          = c("vigilancia", "portería", "seguridad", "camaras", "guardian", "portero"),
+  ascensor           = c("ascensor", "elevador"),
+  gimnasio           = c("gimnasio", "gym"),
+  piscina            = c("piscina", "pileta", "alberca"),
+  bbq                = c("bbq", "asador", "barbacoa"),
+  salon_social       = c("salon social", "zona social", "salon comunal"),
+  zona_infantil      = c("zona infantil", "juegos", "parque infantil"),
+  balcon             = c("balcon", "balcón"),
+  terraza            = c("terraza", "roof", "azotea"),
+  patio              = c("patio", "patio interior"),
+  jardin_exterior    = c("jardin", "jardín", "zona verde"),
+  chimenea           = c("chimenea", "hogar", "chimeneas"),
+  cocina_integral    = c("cocina integral", "cocina moderna"),
+  deposito           = c("deposito", "baulera", "trastero", "bodega"),
+  estudio            = c("estudio", "oficina", "biblioteca"),
+  remodelado         = c("remodelado", "renovado", "actualizado", "reformado"),
+  vista              = c("vista", "panoramica", "panorámica", "mirador"),
+  pisos_vivienda     = c("dos pisos", "tres pisos", "cuatro pisos", "2 pisos", "3 pisos")
+)
+
+
+# Función robusta
+
+add_text_dummies <- function(df, dicc = token_diccionario) {
+  cat("\n>>> Iniciando función add_text_dummies()\n")
+
+  # Asegurar tipo base data.frame
+  df <- as.data.frame(df)
+
+  # Crear ID manual
+  df$id_tmp <- seq_len(nrow(df))
+
+  # Unificar y normalizar texto
+  df$texto_total <- texto_normal(paste(df$title, df$description))
+
+  # Guardar una copia con solo texto e id
+  tokens_df <- data.frame(
+    id_tmp = df$id_tmp,
+    texto_total = df$texto_total,
+    stringsAsFactors = FALSE
+  )
+
+ 
+  # tokenizamos sin tibble ni spec_tbl_df
+  tokens <- tidytext::unnest_tokens(tokens_df, token, texto_total, to_lower = TRUE)
+
+
+  # Crear las dummies por categoría
+  features_list <- list()
+  for (cat in names(dicc)) {
+    palabras <- dicc[[cat]]
+    hits <- tokens %>%
+      dplyr::filter(token %in% palabras) %>%
+      dplyr::distinct(id_tmp) %>%
+      dplyr::mutate(value = 1L)
+
+    base <- tibble(id_tmp = df$id_tmp)
+    merged <- base %>%
+      dplyr::left_join(hits, by = "id_tmp") %>%
+      dplyr::mutate(value = tidyr::replace_na(value, 0L)) %>%
+      dplyr::rename(!!paste0("has_", cat) := value)
+
+    features_list[[cat]] <- merged
+  }
+
+  # Combinar las dummies por id_tmp
+  features <- purrr::reduce(features_list, dplyr::left_join, by = "id_tmp")
+
+  # Unir con el df original
+  out <- dplyr::left_join(df, features, by = "id_tmp") %>%
+    dplyr::select(-texto_total, -id_tmp)
+
+ 
+  return(out)
 }
 
-# === Uso ===
-# train ya cargado como data.frame/tibble con columnas title y description
-train_ready <- add_text_dummies(train)
-test_ready <- add_text_dummies(test)
+# ============================================================
+#. Aplicar a train y test
 
-# (Opcional) ver cobertura de cada dummie en train
-colMeans(dplyr::select(train_ready, starts_with("has_")))
-colMeans(dplyr::select(test_ready, starts_with("has_")))
+train_txt <- add_text_dummies(train)
+test_txt  <- add_text_dummies(test)
+
+
+# Verificar cobertura
+
+colMeans(dplyr::select(train_txt, starts_with("has_")), na.rm = TRUE)
+colMeans(dplyr::select(test_txt,  starts_with("has_")), na.rm = TRUE)
+
+
+
 
 ```
 
-## Obtención de variables a partir de otras fuentes
+
+
+
+# Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
+
+```{r}
+library(dplyr)
+library(purrr)
+library(scales)
+
+
+# Función para evaluar variables binarias vs. precio
+
+score_one_attr <- function(df, attr_col, target = "price") {
+  g <- df %>%
+    summarise(
+      mean1 = mean(.data[[target]][.data[[attr_col]] == 1], na.rm = TRUE),
+      mean0 = mean(.data[[target]][.data[[attr_col]] == 0], na.rm = TRUE),
+      n1    = sum(.data[[attr_col]] == 1, na.rm = TRUE),
+      n0    = sum(.data[[attr_col]] == 0, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  effect   <- g$mean1 - g$mean0
+  pct_diff <- ifelse(is.finite(g$mean0) && g$mean0 != 0, effect / g$mean0, NA_real_)
+  grand    <- mean(df[[target]], na.rm = TRUE)
+  ss_between <- g$n1 * (g$mean1 - grand)^2 + g$n0 * (g$mean0 - grand)^2
+  ss_total   <- sum((df[[target]] - grand)^2, na.rm = TRUE)
+  eta2 <- ifelse(ss_total > 0, ss_between / ss_total, 0)
+
+  tibble(
+    variable = attr_col,
+    support_1 = g$n1,
+    rate_1 = g$n1 / (g$n1 + g$n0),
+    mean_price_1 = g$mean1,
+    mean_price_0 = g$mean0,
+    mean_diff = effect,
+    pct_diff = pct_diff,
+    eta2 = eta2
+  )
+}
+
+# Separar por tipo de propiedad
+
+train_apto <- train_txt %>% filter(property_type %in% c("Apartamento"))
+train_casa <- train_txt %>% filter(property_type %in% c("Casa"))
+
+
+#  Seleccionar variables dummies
+
+flag_cols <- names(train_txt)[grepl("^has_", names(train_txt))]
+
+
+#  Evaluar cada dummy por grupo
+
+stats_apto <- map_dfr(flag_cols, ~score_one_attr(train_apto, .x, target = "price")) %>%
+  mutate(tipo = "Apartamento")
+stats_casa <- map_dfr(flag_cols, ~score_one_attr(train_casa, .x, target = "price")) %>%
+  mutate(tipo = "Casa")
+
+# Combinar resultados
+stats_all <- bind_rows(stats_apto, stats_casa)
+
+
+#  Ranking y selección de las mejores
+
+ranked <- stats_all %>%
+  filter(rate_1 >= 0.03) %>% # Al menos 3% de cobertura
+  mutate(rank_score = eta2 * 0.5 + abs(pct_diff) * 0.3 + rate_1 * 0.2) %>%
+  arrange(tipo, desc(rank_score))
+
+# Top 5 por tipo
+top_by_type <- ranked %>%
+  group_by(tipo) %>%
+  slice_max(order_by = rank_score, n = 5) %>%
+  ungroup() %>%
+  mutate(
+    pct_diff = percent(pct_diff, accuracy = 0.1),
+    rate_1 = percent(rate_1, accuracy = 0.1)
+  ) %>%
+  select(tipo, variable, rate_1, mean_price_1, mean_price_0, pct_diff, eta2)
+
+
+# 5 Resultado
+
+print(top_by_type, n = Inf)
+
+
+# Variables finales seleccionadas
+best_vars <- unique(top_by_type$variable)
+print(best_vars)
+
+
+#  Crear datasets finales coherentes
+
+add_best_vars <- function(df, vars) {
+  # Asegura que las columnas existan en test
+  for (nm in vars) if (!nm %in% names(df)) df[[nm]] <- 0L
+  df %>% mutate(across(all_of(vars), ~as.integer(.)))
+}
+
+train_ready <- add_best_vars(train_txt, best_vars)
+test_ready  <- add_best_vars(test_txt,  best_vars)
+
+
+```
+
+# Obtención de variables a partir de otras fuentes
 
 ### Variables de Open Street Map
 
@@ -626,162 +558,98 @@ colMeans(dplyr::select(test_ready, starts_with("has_")))
 
 ```{r}
 
+# CONFIGURACIÓN GENERAL
 
-#  Configuración inicial
-
-
-# Aumentar tiempo máximo de descarga/lectura y tolerar geometrías
 options(timeout = 1800)
-#permite geometrias no cerradas para identificar barrios y localidades
 Sys.setenv(OGR_GEOMETRY_ACCEPT_UNCLOSED_RING = "YES")
+sf_use_s2(TRUE)
 
-# Desactivar motor s2 para evitar errores de topología
-sf_use_s2(FALSE)
+library(sf)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(units)
+library(here)
+library(osmextract)
 
-if (!dir.exists("outputs")) dir.create("outputs")
+# RUTA Y ÁREA DE INTERÉS
 
-# Definir rutas de salida para archivos procesados
-train_rds <- "outputs/train_ready_osm_bogota_local.rds"
-test_rds  <- "outputs/test_ready_osm_bogota_local.rds"
+file_pbf <- here::here("data", "external", "colombia-251111.osm.pbf")
 
-#Para no volver a procesar, si existen los rds, se cargan con el siguiente comando
-
-if (file.exists(train_rds) & file.exists(test_rds)) {
-  message("Archivos .RDS encontrados. Cargando datos procesados...")
-  
-  train_ready_osm <- readRDS(train_rds)
-  test_ready_osm  <- readRDS(test_rds)
-  
-} else {
- message("No se encontraron .RDS. Iniciando procesamiento desde OpenStreetMap...")
-
-# Ruta local al archivo PBF de Colombia descargado de GeoFabrik
-
-  # Ruta local del archivo .pbf descargado de GeoFabrik
-  file_pbf <- "data/external/colombia-251105.osm.pbf"
-
-
-
-#  Lectura de datos OSM (desde archivo local)
-
-polys  <- oe_read(file_pbf, layer = "multipolygons", quiet = TRUE)
-points <- oe_read(file_pbf, layer = "points", quiet = TRUE)
-lines  <- oe_read(file_pbf, layer = "lines", quiet = TRUE)
-
-# Reparar geometrías inválidas
-polys  <- st_make_valid(polys) |> st_buffer(0)
-points <- st_make_valid(points)
-lines  <- st_make_valid(lines)
-
-# Filtrar a Bogotá (bounding box aproximado)
-
-bbox_bogota <- st_as_sfc(st_bbox(c(
+bbox_bogota <- st_bbox(c(
   xmin = -74.35, xmax = -73.9,
-  ymin = 4.45, ymax = 4.85
-), crs = 4326))
+  ymin = 4.45,  ymax = 4.85
+), crs = 4326)
 
-polys_bogota  <- suppressWarnings(st_crop(polys, bbox_bogota))
-points_bogota <- suppressWarnings(st_crop(points, bbox_bogota))
-lines_bogota  <- suppressWarnings(st_crop(lines, bbox_bogota))
+#  LECTURA SEGURA DE CAPAS OSM
 
-
-#  Extraer Localidades y Barrios
-
-
-localidades <- polys_bogota %>%
-  filter(admin_level == "8") %>%
-  select(name) %>%
-  rename(localidad = name)
-
-barrios <- polys_bogota %>%
-  filter(admin_level == "10" | place == "neighbourhood") %>%
-  select(name) %>%
-  rename(barrio = name)
-
-# Puntos de interés (POI)
-
-get_poi_safe <- function(data, col, values) {
-  if (!col %in% names(data)) {
-    message("o existe la columna '", col, "' en esta capa.")
-    return(NULL)
+extract_tag <- function(df, key) {
+  if (!is.null(df) && !"other_tags" %in% names(df)) return(df)
+  if (key %in% names(df)) return(df)
+  if (!is.null(df$other_tags)) {
+    df[[key]] <- stringr::str_match(df$other_tags, paste0('"', key, '"=>"(.*?)"'))[, 2]
   }
-  data %>% filter(.data[[col]] %in% values)
+  df
 }
 
-# Función robusta que busca en todas las capas disponibles
+# Aplicar extracción a todas las capas antes del filtrado
+points <- extract_tag(points, "leisure")
+polys  <- extract_tag(polys,  "leisure")
+lines  <- extract_tag(lines,  "leisure")
+
+points <- extract_tag(points, "landuse")
+polys  <- extract_tag(polys,  "landuse")
+lines  <- extract_tag(lines,  "landuse")
+
+points <- extract_tag(points, "amenity")
+polys  <- extract_tag(polys,  "amenity")
+lines  <- extract_tag(lines,  "amenity")
+
+# Función general (igual que antes)
 get_poi_all <- function(points, polys, lines, key, values) {
   capas <- list(points, polys, lines)
   pois <- purrr::map_dfr(capas, function(x) {
-    if (!key %in% names(x)) return(NULL)
+    if (is.null(x) || !key %in% names(x)) return(NULL)
     x %>% filter(.data[[key]] %in% values)
   })
   if (nrow(pois) == 0) return(NULL)
   pois
 }
 
-# Crear lista de puntos de interés combinando todas las capas
+# --- Crear lista de POIs con criterios extendidos ---
 pois_list <- list(
-  # Parques y zonas de recreo (incluye golf)
-  parques = get_poi_all(
-    points_bogota, polys_bogota, lines_bogota,
-    key = "leisure",
-    values = c("park", "garden", "recreation_ground", "playground", "golf_course")
+  parques = bind_rows(
+    get_poi_all(points, polys, lines, "leisure",
+                c("park", "garden", "recreation_ground", "playground", "golf_course")),
+    get_poi_all(points, polys, lines, "landuse", c("recreation_ground", "grass", "greenfield")),
+    get_poi_all(points, polys, lines, "amenity", c("park"))
   ),
-  
-  # Colegios, jardines infantiles, universidades
-  colegios = get_poi_all(
-    points_bogota, polys_bogota, lines_bogota,
-    key = "amenity",
-    values = c("school", "kindergarten", "college", "university")
-  ),
-  
-  # Restaurantes, cafeterías y comida rápida
-  restaurantes = get_poi_all(
-    points_bogota, polys_bogota, lines_bogota,
-    key = "amenity",
-    values = c("restaurant", "fast_food", "cafe")
-  ),
-  
-  # Autopistas y vías principales
-  autopistas = get_poi_all(
-    points_bogota, polys_bogota, lines_bogota,
-    key = "highway",
-    values = c("motorway", "trunk", "primary")
-  ),
-  
-  # Centros comerciales y supermercados grandes
-  centros_comerciales = get_poi_all(
-    points_bogota, polys_bogota, lines_bogota,
-    key = "shop",
-    values = c("mall", "supermarket")
-  )
+  colegios = get_poi_all(points, polys, lines, "amenity",
+                         c("school", "kindergarten", "college", "university")),
+  restaurantes = get_poi_all(points, polys, lines, "amenity",
+                             c("restaurant", "fast_food", "cafe", "bar", "pub")),
+  autopistas = get_poi_all(points, polys, lines, "highway",
+                           c("motorway", "trunk", "primary", "secondary", "tertiary")),
+  centros_comerciales = get_poi_all(points, polys, lines, "shop",
+                                    c("mall", "supermarket", "marketplace"))
 )
 
-
-# Eliminar vacíos (NULL o sin filas)
+# Limpiar vacíos
 pois_list <- purrr::discard(pois_list, ~is.null(.) || nrow(.) == 0)
 
 
-purrr::walk(names(pois_list), function(nm) {
-  cat(sprintf("  - %-20s %5d registros\n", nm, nrow(pois_list[[nm]])))
-})
-
-
-# Convertirs bases a  objetos espaciales
-
+#  CONVERTIR A SF Y TRANSFORMAR CRS A 3116 (métrico)
 train_sf <- st_as_sf(train_ready, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
 test_sf  <- st_as_sf(test_ready,  coords = c("lon", "lat"), crs = 4326, remove = FALSE)
 
-# Transformar todo a proyección métrica (EPSG:3116)
 train_sf <- st_transform(train_sf, 3116)
 test_sf  <- st_transform(test_sf, 3116)
 localidades <- st_transform(localidades, 3116)
-barrios <- st_transform(barrios, 3116)
-pois_sf <- map(pois_list, ~st_transform(., 3116))
+barrios     <- st_transform(barrios, 3116)
+pois_sf     <- map(pois_list, ~st_transform(., 3116))
 
 
-#  Calcular distancias a cada tipo de POI
-
+#  FUNCIÓN DE DISTANCIAS
 
 calc_min_dist <- function(x, y) {
   if (is.null(y) || nrow(y) == 0) return(rep(NA, nrow(x)))
@@ -792,12 +660,12 @@ calc_min_dist <- function(x, y) {
 }
 
 for (nm in names(pois_sf)) {
+  message("📏 Calculando distancia a ", nm, " ...")
   train_sf[[paste0("dist_", nm)]] <- calc_min_dist(train_sf, pois_sf[[nm]])
-  test_sf[[paste0("dist_", nm)]]  <- calc_min_dist(test_sf, pois_sf[[nm]])
+  test_sf [[paste0("dist_", nm)]] <- calc_min_dist(test_sf , pois_sf[[nm]])
 }
 
-#  Unión espacial con barrios y localidades
-
+# UNIÓN CON LOCALIDADES Y BARRIOS
 
 train_sf <- train_sf %>%
   st_join(barrios, join = st_within) %>%
@@ -807,28 +675,27 @@ test_sf <- test_sf %>%
   st_join(barrios, join = st_within) %>%
   st_join(localidades, join = st_within)
 
-#Aseguramos el CRS correcto
-st_crs(train_espacial) <- NA
-st_crs(test_espacial)  <- NA
+# REASIGNAR CRS Y GUARDAR
 
-st_crs(train_espacial) <- 4326
-st_crs(test_espacial)  <- 4326
+st_crs(train_sf) <- NA
+st_crs(test_sf)  <- NA
 
-#Eliminar geometria y guardar
+st_crs(train_sf) <- 4326
+st_crs(test_sf)  <- 4326
+
 train_ready_osm <- st_drop_geometry(train_sf)
 test_ready_osm  <- st_drop_geometry(test_sf)
 
-# Exportar dataset
+saveRDS(train_ready_osm, "outputs/train_ready_osm.rds")
+saveRDS(test_ready_osm,  "outputs/test_ready_osm.rds")
+saveRDS(polys, "outputs/polys.rds")
+saveRDS(lines,  "outputs/lines.rds")
+saveRDS(points, "outputs/points.rds")
 
 
-  saveRDS(train_ready_osm, train_rds)
-  saveRDS(test_ready_osm,  test_rds)
-}
-colnames(train_ready_osm)
 ```
 
-
-## Viviendas en venta del test y train
+## Gráfica: Viviendas en venta del test y train
 
 En esta sección se gráfica las viviendas obtenidas en la base de datos de entrenamiento y de testeo visualizando concentraciones de vivienda.
 
@@ -902,6 +769,13 @@ m <- m +
   )
 
 m
+
+#Directorio
+root_dir <- here::here()
+
+# Crea subrutas relativas al proyecto
+path_outputs <- file.path(root_dir, "outputs")
+path_figures <- file.path(path_outputs, "figures")
 
 #  Guardar
 dir.create("outputs/figures", recursive = TRUE, showWarnings = FALSE)
@@ -999,221 +873,510 @@ m_poi<-ggplot() +
   )
 
 #  Guardar
+
+root_dir <- here::here()
+
+# Crea subrutas relativas al proyecto
+path_outputs <- file.path(root_dir, "outputs")
+path_figures <- file.path(path_outputs, "figures")
+
+
 dir.create("outputs/figures", recursive = TRUE, showWarnings = FALSE)
 ggsave("outputs/figures/mapa_train_pois_bogota.png", m_poi , width = 8, height = 6, dpi = 300)
 
 
 m_poi
 ```
-## Transformaciones a las variables espaciales
 
-El objetivo de estas transformaciones es capturar cómo la proximidad a ciertos puntos de interés influye en el valor de una vivienda, diferenciando entre efectos positivos y negativos según la distancia.
-
-- Autopistas: vivir justo al lado reduce el valor (ruido, contaminación), pero estar cerca —sin estar expuesto— puede ser positivo por accesibilidad.
-
-- Parques y zonas verdes: mayor valor cuanto más cerca, aunque con rendimientos decrecientes, por eso se usa una transformación logarítmica.
-
-- Colegios y jardines: un punto óptimo entre 100 m y 500 m, balanceando conveniencia y externalidades (ruido, tráfico).
-
-- Centros comerciales: cercanía moderada es deseable, pero el exceso de tráfico y ruido reduce el atractivo si se está demasiado cerca.
-
-- Restaurantes y cafeterías: capturan vitalidad urbana; la cercanía tiende a ser positiva.
-
-- Estaciones de transporte público: cercanía razonable mejora accesibilidad, pero el exceso de proximidad puede implicar congestión.
-```{r}
-
-# Transformaciones y categorizaciones de variables espaciales
-
-procesar_distancias <- function(df) {
-  df %>%
-    mutate(
-      # Parques y zonas verdes (incluye golf)
-      dist_parques_log = log1p(dist_parques),
-
-      #  Colegios y jardines 
-      dist_colegios2 = dist_colegios^2,
-      dist_colegios_cat = case_when(
-        dist_colegios < 50 ~ "muy_cerca",
-        dist_colegios <= 500 ~ "cerca_optima",
-        TRUE ~ "lejos"
-      ),
-
-      # Restaurantes, cafeterías y comida rápida
-      dist_restaurantes_log = log1p(dist_restaurantes),
-
-      #  Centros comerciale
-      dist_malls_cat = case_when(
-        dist_centros_comerciales <= 1000 ~ "cerca",
-        dist_centros_comerciales <= 3000 ~ "media",
-        TRUE ~ "lejos"
-      ),
-
-      # Autopistas
-      dist_autopistas2 = dist_autopistas^2,
-      dist_autopistas_cat = case_when(
-        dist_autopistas < 50 ~ "muy_cerca",
-        dist_autopistas >= 50 & dist_autopistas <= 500 ~ "cerca_optima",
-        dist_autopistas > 500 ~ "lejos",
-        TRUE ~ NA_character_
-      )
-    ) %>%
-    mutate(
-      # Convertir categóricas en factor con orden lógico
-      across(ends_with("_cat"), ~factor(., 
-        levels = c("muy_cerca", "cerca_optima", "media", "lejos")
-      ))
-    )
-} 
-
-# Aplicar a train y test
-train_osm <- procesar_distancias(train_ready_osm)
-test_osm <- procesar_distancias(test_ready_osm)
-
-# Guardar versiones actualizadas
-saveRDS(train_osm, "outputs/train_sf_distancias_transformadas.rds")
-saveRDS(test_osm,  "outputs/test_sf_distancias_transformadas.rds")
-
-
-```
 
 ##Inclusión de estrato socioeconomico
 
+A continuación se asigna el estrato socioeconómico a cada vivienda en las bases train y test a partir de los polígonos de lotes oficiales del DANE.
+
+El procedimiento realiza los siguientes pasos:
+
+- Carga de datos: se leen los archivos geoespaciales LOTE.gpkg (geometría) y estrato.csv (información tabular).
+
+- Unión por código del lote: se vincula cada lote con su estrato correspondiente y se limpia la información.
+
+- Conversión a objetos espaciales (sf): las bases de viviendas (train y test) se transforman a coordenadas EPSG:3116 para asegurar compatibilidad geográfica.
+
+- Asignación directa: se realiza una unión espacial (st_join) para asignar el estrato cuando la vivienda cae dentro de un lote.
+
+- Imputación por proximidad: para viviendas sin estrato (NA o 0), se usa el algoritmo k-nearest neighbor (RANN::nn2), que asigna el estrato del lote más cercano, evitando alto costo computacional.
+
+- Exportación: los resultados finales se guardan en formato .rds y .csv para uso posterior.
+
+
 ```{r}
-# Este bloque ejecuta un proceso de enriquecimiento de datos en tres pasos:
-# 1. Carga las tres fuentes de datos: Lotes (geometría) y Estrato (datos).
-# 2. Las une usando un código de identificación común (la "llave").
-# 3. Une espacialmente el resultado final con las viviendas.
-# 4. Realiza la unión espacial para asignar el estrato a cada vivienda.
-# 5. Actualiza las bases finales y verifica el resultado.
 
+# Verificar si existen archivos procesados
 
-# Definir rutas de salida para archivos procesados
 train_rds_estrato <- "outputs/train_ready_osm_estrato.rds"
 test_rds_estrato  <- "outputs/test_ready_osm_estrato.rds"
+lines <- "outputs/lines.rds"
+polys <- "outputs/polys.rds"
+points<- "outputs/points.rds"
 
-#Para no volver a procesar, si existen los rds, se cargan con el siguiente comando
 
 if (file.exists(train_rds_estrato) & file.exists(test_rds_estrato)) {
-  message("Archivos .RDS encontrados. Cargando datos procesados...")
-  
+
   train_ready_osm_estrato <- readRDS(train_rds_estrato)
   test_ready_osm_estrato  <- readRDS(test_rds_estrato)
-  
+  points <- readRDS(points)
+  polys  <- readRDS(polys)
+  lines <- readRDS(lines)
+
 } else {
- message("No se encontraron .RDS. ")
 
+
+# Cargar fuentes externas 
+
+  ruta_gpkg <- here("data", "external", "LOTE.gpkg")
+  ruta_estrato_csv <- here("data", "external", "estrato.csv")
+
+  if (!file.exists(ruta_gpkg)) stop("No se encontró el archivo 'LOTE.gpkg' en: ", ruta_gpkg)
+  if (!file.exists(ruta_estrato_csv)) stop("No se encontró el archivo 'estrato.csv' en: ", ruta_estrato_csv)
+
+  lotes_sf <- sf::st_read(ruta_gpkg, quiet = TRUE)
+  estrato_df <- readr::read_csv(ruta_estrato_csv, show_col_types = FALSE)
+ 
+
+
+# Preparar y unir Lotes + Estrato
+  lotes_pre <- lotes_sf %>%
+    rename(codigo_lote_llave = LOTCODIGO) %>%
+    mutate(codigo_lote_llave = as.character(codigo_lote_llave))
+
+  estrato_pre <- estrato_df %>%
+    rename(codigo_lote_llave = ESOCLOTE) %>%
+    mutate(codigo_lote_llave = as.character(codigo_lote_llave)) %>%
+    distinct(codigo_lote_llave, .keep_all = TRUE)
+
+  lotes_estrato_sf <- lotes_pre %>%
+    left_join(estrato_pre, by = "codigo_lote_llave") %>%
+    select(codigo_lote_llave, estrato = ESOESTRATO, geom) %>%
+    filter(!is.na(estrato) & estrato > 0) %>%
+    mutate(estrato = as.numeric(as.character(estrato))) %>%
+    st_make_valid()
+
+
+# Preparar viviendas (train/test)
+
+  to_sf <- function(df) {
+    if (!inherits(df, "sf"))
+      st_as_sf(df, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+    else df
+  }
+
+  train_sf <- to_sf(train_ready_osm) |> st_transform(3116)
+  test_sf  <- to_sf(test_ready_osm)  |> st_transform(3116)
+  lotes_estrato_sf <- st_transform(lotes_estrato_sf, 3116)
+
+
+#  Unión espacial directa
+
+  train_sf_join <- st_join(train_sf, lotes_estrato_sf, join = st_intersects, left = TRUE)
+  test_sf_join  <- st_join(test_sf,  lotes_estrato_sf, join = st_intersects, left = TRUE)
+
+# Normalizar el nombre y tipo de columna
+  normalizar_estrato <- function(df) {
+    df %>%
+      rename(estrato = matches("estrato", ignore.case = TRUE)) %>%
+      mutate(estrato = as.numeric(as.character(estrato)))
+  }
+
+  train_sf_join <- normalizar_estrato(train_sf_join)
+  test_sf_join  <- normalizar_estrato(test_sf_join)
+
+
+# Imputación por proximidad (solo faltantes reales)
+
+
+# Crear centroides de los lotes para representar cada polígono
+lotes_centroides <- sf::st_centroid(lotes_estrato_sf)
+coords_lotes <- sf::st_coordinates(lotes_centroides)
+
+# Preparar los datos de entrenamiento 
+coords_train <- sf::st_coordinates(train_sf_join)
+
+# Identificar las viviendas sin estrato asignado
+faltantes <- which(is.na(train_sf_join$estrato) | train_sf_join$estrato == 0)
+
+
+if (length(faltantes) > 0) {
+# Buscar el vecino más cercano en los centroides de lotes
+  nn <- RANN::nn2(
+    data = coords_lotes, 
+    query = coords_train[faltantes, ], #faltantes de estrato
+    k = 1 #El mas cercano
+  )
   
+  # Asignar el estrato del lote más cercano
+  train_sf_join$estrato[faltantes] <- lotes_estrato_sf$estrato[nn$nn.idx]
+} #indice del lote mas cercano
 
-# --- 1. Cargar Archivos Fuente ---
-# Para mayor robustez, se recomienda tener estos archivos en la carpeta del proyecto.
-ruta_gpkg <- "C:/Users/User/OneDrive/Documents/GitHub/Taller3_Making Money with ML/data/external/LOTE.gpkg"
-ruta_estrato_csv <- "C:/Users/User/OneDrive/Documents/GitHub/Taller3_Making Money with ML/data/external/estrato.csv"
+# Repetir para el test
+coords_test <- sf::st_coordinates(test_sf_join)
+faltantes_t <- which(is.na(test_sf_join$estrato) | test_sf_join$estrato == 0)
 
-if (!file.exists(ruta_gpkg)) stop("¡Archivo LOTE.gpkg no encontrado!")
-lotes_sf <- sf::st_read(ruta_gpkg)
-message("GeoPackage 'LOTE.gpkg' cargado.")
-
-if (!file.exists(ruta_estrato_csv)) stop("¡Archivo 'estrato.csv' no encontrado!")
-estrato_csv_df <- readr::read_csv(ruta_estrato_csv)
-message("Tabla de estrato 'estrato.csv' cargada.")
-
-
-# --- 2. Preparar y Unir Lotes con Estratos ---
-
-lotes_preparado_sf <- lotes_sf %>%
-  dplyr::rename(codigo_lote_llave = LOTCODIGO) %>%
-  dplyr::mutate(codigo_lote_llave = as.character(codigo_lote_llave))
-
-estrato_preparado_df <- estrato_csv_df %>%
-  dplyr::rename(codigo_lote_llave = ESOCLOTE) %>%
-  dplyr::mutate(codigo_lote_llave = as.character(codigo_lote_llave)) %>%
-  # Paso CRUCIAL: Eliminamos lotes duplicados para asegurar una unión 1 a 1.
-  dplyr::distinct(codigo_lote_llave, .keep_all = TRUE)
-
-# Realizamos la unión (merge)
-message("Uniendo Lotes y Estratos por el código del lote...")
-lotes_con_estrato_sf <- lotes_preparado_sf %>%
-  dplyr::left_join(estrato_preparado_df, by = "codigo_lote_llave") %>%
-  # Seleccionamos solo las columnas que necesitamos para el paso final.
-  dplyr::select(estrato = ESOESTRATO, geom) %>%
-  # Filtramos lotes que no lograron obtener un estrato
-  dplyr::filter(!is.na(estrato)) %>%
-  dplyr::mutate(estrato = as.factor(estrato))
-message("¡Unión completada!")
-
-
-# --- 3. Preparar Bases de Viviendas para Unión Espacial ---
-
-# Aseguramos que las bases de viviendas (train/test) sean objetos 'sf'
-# y tengan el sistema de coordenadas correcto.
-message("\nPreparando bases de datos de viviendas...")
-
-# Convertir train_ready_osm a 'sf'
-if (!inherits(train_ready_osm, "sf")) {
-  train_sf <- sf::st_as_sf(train_ready_osm, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
-} else {
-  train_sf <- train_ready_osm
+if (length(faltantes_t) > 0) {
+  nn_t <- RANN::nn2(
+    data = coords_lotes, 
+    query = coords_test[faltantes_t, ], 
+    k = 1
+  )
+  
+  test_sf_join$estrato[faltantes_t] <- lotes_estrato_sf$estrato[nn_t$nn.idx]
 }
 
-# Convertir test_ready_osm a 'sf'
-if (!inherits(test_ready_osm, "sf")) {
-  test_sf <- sf::st_as_sf(test_ready_osm, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
-} else {
-  test_sf <- test_ready_osm
-}
-
-# Unificar TODOS los CRS a EPSG:3116 para la unión espacial.
-message("Unificando Sistemas de Coordenadas (CRS) a EPSG:3116...")
-lotes_con_estrato_sf <- sf::st_transform(lotes_con_estrato_sf, crs = 3116)
-train_sf <- sf::st_transform(train_sf, crs = 3116)
-test_sf  <- sf::st_transform(test_sf, crs = 3116)
-message("¡Todos los CRS unificados!")
+#resultado despues de la imputación y el join
+train_sf_final <- train_sf_join
+test_sf_final  <- test_sf_join
 
 
-# --- 4. Realizar la Unión Espacial ---
-# Asignamos el estrato a cada vivienda según su ubicación.
-message("\nRealizando unión espacial con la base de entrenamiento...")
-train_final_sf <- sf::st_join(train_sf, lotes_con_estrato_sf, join = st_intersects, left = TRUE)
+# Exportar resultados en rds y csv (por si acaso)
 
-message("Realizando unión espacial con la base de prueba...")
-test_final_sf  <- sf::st_join(test_sf, lotes_con_estrato_sf, join = st_intersects, left = TRUE)
-
-
-# --- 5. Verificación y Finalización ---
-message("\n--- Resultados de la Unión ---")
-cat("Estratos asignados en TRAIN:", sum(!is.na(train_final_sf$estrato)), "de", nrow(train_final_sf), "\n")
-cat("Estratos asignados en TEST:",  sum(!is.na(test_final_sf$estrato)),  "de", nrow(test_final_sf),  "\n")
-
-# Actualizamos nuestras bases de datos finales.
-# Esta vez nos aseguramos de no duplicar columnas y de manejar la geometría correctamente.
-train_ready_osm_estrato <- sf::st_drop_geometry(train_final_sf)
-test_ready_osm_estrato  <- sf::st_drop_geometry(test_final_sf)
-
-# Verificamos que la columna 'estrato' fue añadida
-glimpse(train_ready_osm_estrato)
-
-message("\n¡PROCESO COMPLETADO! La columna 'estrato' ha sido añadida a 'train_ready_osm' y 'test_ready_osm'.")
-
-# --- 6. (Opcional) Guardar resultados y visualizar ---
-dir.create("outputs", showWarnings = FALSE)
-readr::write_csv(train_ready_osm_estrato, "outputs/train_final_con_estrato.csv")
-message("\nBase de entrenamiento final guardada en la carpeta 'outputs'.")
-
-# Gráfico de validación visual
-ggplot() +
-  geom_sf(data = lotes_con_estrato_sf, aes(fill = estrato), color = NA, alpha = 0.5) +
-  geom_sf(data = head(train_sf, 1000), color = "black", size = 0.5) + # Graficamos solo 1000 puntos para que sea rápido
-  scale_fill_viridis_d(name = "Estrato") +
-  theme_minimal() +
-  labs(title = "Validación Visual de Estratos y Viviendas",
-       subtitle = "Polígonos = Lotes con estrato, Puntos = Viviendas (muestra)")
-
-
-# Exportar dataset
-
+  train_ready_osm_estrato <- st_drop_geometry(train_sf_final)
+  test_ready_osm_estrato  <- st_drop_geometry(test_sf_final)
 
   saveRDS(train_ready_osm_estrato, train_rds_estrato)
   saveRDS(test_ready_osm_estrato,  test_rds_estrato)
+
+  readr::write_csv(train_ready_osm_estrato, "outputs/train_final_con_estrato.csv")
+  readr::write_csv(test_ready_osm_estrato,  "outputs/test_final_con_estrato.csv")
+
 }
-##
+
 ```
+
+#### Correcciones
+La capa de parques se encontraba dañada por ende, en el siguiente bloque de codigo se repara:
+
+```{r}
+
+
+
+# Función que extrae tags desde other_tags (si no existen)
+
+extract_tag <- function(df, key) {
+  if (key %in% names(df)) return(df)
+  if (!"other_tags" %in% names(df)) return(df)
+  df[[key]] <- str_match(df$other_tags, paste0('"', key, '"=>"(.*?)"'))[, 2]
+  df
+}
+
+
+#  Extraer leisure, landuse, amenity SOLO para parques
+
+tags_needed <- c("leisure", "landuse", "amenity")
+
+for (tg in tags_needed) {
+  points_bogota <- extract_tag(points, tg)
+  polys_bogota  <- extract_tag(polys,  tg)
+  lines_bogota  <- extract_tag(lines,  tg)
+}
+
+
+# Reconstruir parques desde leisure / landuse / amenity
+
+
+
+parques <- bind_rows(
+
+  # LEISURE
+  points_bogota %>% filter(leisure %in% c("park", "garden", "recreation_ground", "playground")),
+  polys_bogota  %>% filter(leisure %in% c("park", "garden", "recreation_ground", "playground")),
+  lines_bogota  %>% filter(leisure %in% c("park", "garden", "recreation_ground", "playground")),
+
+  # LANDUSE
+  points_bogota %>% filter(landuse %in% c("recreation_ground", "grass")),
+  polys_bogota  %>% filter(landuse %in% c("recreation_ground", "grass")),
+  lines_bogota  %>% filter(landuse %in% c("recreation_ground", "grass")),
+
+  # AMENITY
+  points_bogota %>% filter(amenity == "park"),
+  polys_bogota  %>% filter(amenity == "park"),
+  lines_bogota  %>% filter(amenity == "park")
+)
+
+# Quitar duplicados
+parques <- parques %>% distinct(osm_id, .keep_all = TRUE)
+
+
+#  parques en boundary = protected_area
+
+if ("boundary" %in% names(polys_bogota)) {
+  parques_pa <- polys_bogota %>% filter(boundary %in% c("protected_area", "national_park"))
+  if (nrow(parques_pa) > 0) {
+    cat("   + Parques adicionales en protected_area: ", nrow(parques_pa), "\n")
+    parques <- bind_rows(parques, parques_pa) %>%
+      distinct(osm_id, .keep_all = TRUE)
+  }
+}
+
+cat("   Total parques finales: ", nrow(parques), "\n\n")
+
+# Convertir parques a sf válido y transformar a 3116
+
+if (nrow(parques) == 0) {
+  stop(" no se detectaron parques")
+}
+
+
+
+parques_sf <- parques %>%
+  st_make_valid() %>%
+  st_transform(3116)
+
+# Si hay líneas → buffer
+if (any(st_geometry_type(parques_sf) %in% c("LINESTRING", "MULTILINESTRING"))) {
+  parques_sf <- parques_sf %>%
+    st_cast("MULTILINESTRING") %>%
+    st_buffer(20)
+}
+
+parques_sf <- parques_sf[!st_is_empty(parques_sf), ]
+
+# Función de distancia
+
+calc_min_dist <- function(x, y) {
+  if (is.null(y) || nrow(y) == 0) return(rep(NA_real_, nrow(x)))
+  x <- st_make_valid(x)
+  y <- st_make_valid(y)
+  y <- y[!st_is_empty(y), ]
+  if (nrow(y) == 0) return(rep(NA_real_, nrow(x)))
+
+  d <- suppressWarnings(st_distance(x, y))
+
+  apply(d, 1, function(v) {
+    if (all(is.na(v))) NA else min(v, na.rm = TRUE)
+  }) %>% set_units("m") %>% drop_units()
+}
+
+
+#  Calcular SOLO dist_parques
+
+train_ready_osm_estrato <- st_as_sf(train_ready_osm_estrato, coords = c("lon", "lat"), crs = 4326)
+test_ready_osm_estrato <- st_as_sf(test_ready_osm_estrato,  coords = c("lon", "lat"), crs = 4326)
+
+# Transformar a métrico (3116)
+train_ready_osm_estrato <- st_transform(train_ready_osm_estrato, 3116)
+test_ready_osm_estrato <- st_transform(test_ready_osm_estrato, 3116)
+
+#Calcular distancias
+
+train_ready_osm_estrato$dist_parques <- calc_min_dist(train_ready_osm_estrato, parques_sf)
+
+
+test_ready_osm_estrato$dist_parques  <- calc_min_dist(test_ready_osm_estrato, parques_sf)
+
+
+print(summary(train_ready_osm_estrato$dist_parques))
+
+```
+
+
+## Manipulación final de datos
+
+Una vez revisado problematicas de valores faltantes y outlier y correlación espacial. Se procede a corregir las bases para evitar el sobre ajuste y la falta de variables altamente significativas.
+
+### Autocrrelación espacial.
+
+En mapas anteriores, se puede ver que en la base de entrenamiento, cuenta con viviendas ubicadas en chapinero, o muy cercanas a esta localidad lo cual puede incurrir en que el modelo se aprenda ubicaciones más no generalice, causando error fuera de muestra. No obstante, para corregir dicho error, se estima un buffer de 1km  según los datos de la base de prueba que permita que el modelo pueda generalizar mejor 
+
+```{r}
+
+
+# Convertir a sf
+
+train_buffer <- st_as_sf(train_ready_osm_estrato, coords = c("lon", "lat"), crs = 4326)
+test_buffer  <- st_as_sf(test_ready_osm_estrato,  coords = c("lon", "lat"), crs = 4326)
+
+# Transformar a proyección métrica (en metros)
+train_buffer <- st_transform(train_buffer, 3116)
+test_buffer <- st_transform(test_buffer, 3116)
+
+chapinero_test <- test_buffer |> filter(localidad == "Localidad Chapinero")
+
+
+# Crear un buffer de 500 mts alrededor de todas las viviendas de Chapinero
+buffer_chapinero <- chapinero_test |>
+  st_union() |>          
+  st_buffer(dist = 500) 
+
+# Identificar cuáles puntos del train están dentro del buffer
+idx_intersects <- st_intersects(train_buffer, buffer_chapinero, sparse = FALSE)[,1]
+
+# Excluir esos puntos del train
+train_sf_clean <- train_buffer[!idx_intersects, ]
+
+
+# Visualización
+plot(st_geometry(train_buffer), col = "grey80")
+plot(st_geometry(buffer_chapinero), add = TRUE, border = "red", lwd = 2)
+
+
+
+
+
+
+```
+### Manipulación valores faltantes 
+
+```{r}
+remove.packages("rlang")
+install.packages("rlang")
+
+
+library(tidyverse)
+library(tidymodels)
+
+
+#Seleccionamos las variables a imputar
+train_imp <- train_sf_clean %>% 
+  select(surface_total, surface_covered, bedrooms, bathrooms)
+
+test_imp <- test_ready_osm_estrato %>% 
+  select(surface_total, surface_covered, bedrooms, bathrooms)
+
+# Construir dataset combinado
+#    (Para imputar train y test de forma consistente)
+
+
+full_data <- 
+  bind_rows(
+    train_imp %>% mutate(dataset = "train"),
+    test_imp  %>% mutate(dataset = "test")
+  )
+
+
+# Datos completos (para entrenar el imputador)
+
+
+complete_rows <- full_data %>% 
+  drop_na(surface_total, surface_covered, bedrooms, bathrooms)
+
+# ==========================================
+# 4) Separación interna train/test para CV
+# ==========================================
+
+set.seed(2025)
+index_test <- sample(
+  1:nrow(complete_rows),
+  size = round(0.2 * nrow(complete_rows)),
+  replace = FALSE
+)
+
+db_train <- complete_rows[-index_test, ]
+db_test  <- complete_rows[index_test, ]
+
+# ==========================================
+# 5) Validación cruzada
+# ==========================================
+
+cv_folds <- vfold_cv(
+  data = db_train,
+  v = 5
+)
+
+
+```
+
+
+```{r}
+
+
+# ===============================
+# 7) Distribuciones (gráficos sencillos)
+# ===============================
+
+# 7.1 Histograma para cada numérica (train)
+if (length(num_cols) > 0) {
+  train %>%
+    select(all_of(num_cols)) %>%
+    pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
+    ggplot(aes(x = valor)) +
+    geom_histogram(bins = 30) +
+    facet_wrap(~ variable, scales = "free", ncol = 3) +
+    labs(title = "Histogramas (TRAIN)", x = NULL, y = "Frecuencia")
+}
+
+# 7.2 Densidad del target (train), si existe
+if (target %in% names(train)) {
+  # Densidad en escala original
+  ggplot(train, aes(x = .data[[target]])) +
+    geom_density() +
+    labs(title = paste("Densidad de", target, "(TRAIN)"), x = target, y = "Densidad")
+
+  # Densidad en log (opcional)
+  if (all(is.finite(train[[target]]), na.rm = TRUE)) {
+    ggplot(train %>% filter(.data[[target]] > 0), aes(x = log1p(.data[[target]]))) +
+      geom_density() +
+      labs(title = paste("Densidad de log1p(", target, ") (TRAIN)"), x = paste0("log1p(", target, ")"), y = "Densidad")
+  }
+}
+
+# 7.3 Boxplots del target por algunas categóricas (top k categorías más frecuentes)
+top_k_levels <- function(x, k = 12) {
+  forcats::fct_lump_n(x, n = k, other_level = "otros")
+}
+
+if (target %in% names(train) && length(cat_cols) > 0) {
+  for (cc in cat_cols) {
+    p <- train %>%
+      mutate(..grp = top_k_levels(.data[[cc]], k = 12)) %>%
+      ggplot(aes(x = ..grp, y = .data[[target]])) +
+      geom_boxplot(outlier.alpha = 0.2) +
+      coord_flip() +
+      labs(title = paste("Boxplot de", target, "por", cc, "(TRAIN)"),
+           x = cc, y = target)
+    print(p)
+  }
+}
+
+# 7.4 Pares de variables (scatter) para algunas numéricas clave
+pairs_cols <- intersect(num_cols, c("bathrooms","bedrooms","rooms","surface_total","surface_covered","lat","lon","year","month"))
+if (length(pairs_cols) >= 2 && target %in% names(train)) {
+  df_pairs <- train %>% select(all_of(pairs_cols), all_of(target)) %>% drop_na()
+  GGally::ggpairs(df_pairs, columns = 1:length(pairs_cols),
+                  title = "Matriz de pares (subset numérico) - TRAIN")
+}
+
+
+# Correlaciones numéricas
+
+if (length(num_cols) >= 2) {
+  # correlaciones entre numéricas (train)
+  cormat <- train %>% select(all_of(num_cols)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    cor(use = "pairwise.complete.obs")
+
+  ggcorrplot::ggcorrplot(cormat, lab = FALSE, type = "lower") +
+    ggtitle("Correlación entre variables numéricas (TRAIN)")
+
+# correlación con target si numérico
+  if (target %in% names(train) && is.numeric(train[[target]])) {
+    cor_with_target <- train %>%
+      select(all_of(num_cols), all_of(target)) %>%
+      cor(use = "pairwise.complete.obs") %>%
+      as.data.frame() %>%
+      rownames_to_column("variable") %>%
+      select(variable, all_of(target)) %>%
+      arrange(desc(abs(.data[[target]])))
+    cat("\nCorrelación con el target (TRAIN):\n")
+    print(cor_with_target)
+  }
+}
+
+
+# columnas a modelar
+
+keep_features <- setdiff(cols_common, target)  # lo común menos la y
+cat("\nFeatures a usar (comunes, sin target):\n")
+print(keep_features)
+```
+
+
+
+
