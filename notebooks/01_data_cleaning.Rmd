@@ -1443,6 +1443,8 @@ test_final <- test_final %>%
     bedrooms  = ifelse(!is.na(bedrooms),  round(bedrooms),  bedrooms)
   )
 
+#Exportar
+
 # Ruta dinámica
 
 
@@ -1458,7 +1460,15 @@ write.csv(test_final,
           file.path(output_dir, "test_final.csv"),
           row.names = FALSE)
 
+saveRDS(
+  train_final,
+  file.path(output_dir, "train_final.rds")
+)
 
+saveRDS(
+  test_final,
+  file.path(output_dir, "test_final.rds")
+)
 
 ```
 
