@@ -1225,63 +1225,243 @@ plot(st_geometry(buffer_chapinero), add = TRUE, border = "red", lwd = 2)
 ### Manipulación valores faltantes 
 
 ```{r}
-remove.packages("rlang")
-install.packages("rlang")
+
+#Primero intentamos extraer información de la descripcion 
+extract_from_text <- function(text) {
+  
+  txt <- tolower(text)
+  
+  # baños
+  baños <- str_extract(txt, "(\\d+)\\s*(baños|banos|baño|bano)")
+  baños <- as.numeric(str_extract(baños, "\\d+"))
+  
+  # habitaciones
+  habs <- str_extract(txt, "(\\d+)\\s*(habitaciones|habitacion|cuartos|cuarto|alcobas|alcoba)")
+  habs <- as.numeric(str_extract(habs, "\\d+"))
+  
+  # área total
+  area <- str_extract(txt, "(\\d+)\\s*(m2|metros|mts)")
+  area <- as.numeric(str_extract(area, "\\d+"))
+  
+  tibble(
+    text_bathrooms  = baños,
+    text_bedrooms   = habs,
+    text_surface    = area
+  )
+}
+
+train_text_features <- extract_from_text(train_sf_clean$description)
+test_text_features  <- extract_from_text(test_ready_osm_estrato$description)
+
+# Añadir estas variables
+
+train_sf_clean <- bind_cols(train_sf_clean, train_text_features)
+test_ready_osm_estrato <- bind_cols(test_ready_osm_estrato, test_text_features)
 
 
-library(tidyverse)
-library(tidymodels)
+fill_from_text <- function(df) {
+  df %>%
+    mutate(
+      bathrooms = ifelse(is.na(bathrooms) & !is.na(text_bathrooms), text_bathrooms, bathrooms),
+      bedrooms  = ifelse(is.na(bedrooms)  & !is.na(text_bedrooms),  text_bedrooms,  bedrooms),
+      surface_total = ifelse(is.na(surface_total) & !is.na(text_surface), text_surface, surface_total)
+    )
+}
+
+train_sf_clean <- fill_from_text(train_sf_clean)
+test_ready_osm_estrato <- fill_from_text(test_ready_osm_estrato)
 
 
-#Seleccionamos las variables a imputar
-train_imp <- train_sf_clean %>% 
-  select(surface_total, surface_covered, bedrooms, bathrooms)
+# Extraer variables a imputar (sin geometría)
 
-test_imp <- test_ready_osm_estrato %>% 
-  select(surface_total, surface_covered, bedrooms, bathrooms)
+train_imp <- train_sf_clean %>%
+  st_drop_geometry() %>%
+  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
 
-# Construir dataset combinado
-#    (Para imputar train y test de forma consistente)
+test_imp <- test_ready_osm_estrato %>%
+  st_drop_geometry() %>%
+  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
 
 
-full_data <- 
-  bind_rows(
-    train_imp %>% mutate(dataset = "train"),
-    test_imp  %>% mutate(dataset = "test")
+# Unir datos para imputación consistente
+
+
+full <- bind_rows(
+  train_imp %>% mutate(dataset = "train"),
+  test_imp  %>% mutate(dataset = "test")
+)
+
+
+# Función general de imputación
+
+
+impute_var <- function(data, target, predictors) {
+  
+  df <- data
+  
+  complete_rows <- df %>% drop_na(all_of(c(target, predictors)))
+  missing_rows  <- df %>% filter(is.na(.data[[target]]))
+  
+  if (nrow(missing_rows) == 0) return(df)
+  
+  rec <- recipe(as.formula(
+    paste(target, "~", paste(predictors, collapse = "+"))
+  ), data = complete_rows)
+  
+  mod <- rand_forest(mtry = 2, trees = 300, min_n = 5) %>%
+    set_engine("ranger") %>%
+    set_mode("regression")
+  
+  wf <- workflow() %>% add_recipe(rec) %>% add_model(mod)
+  
+  fit_mod <- fit(wf, complete_rows)
+  
+  preds <- predict(fit_mod, missing_rows) %>% pull(.pred)
+  
+  df[[target]][is.na(df[[target]])] <- preds
+  
+  df
+}
+
+
+# Imputación encadenada
+
+
+# bedrooms
+full <- impute_var(full, "bedrooms",
+                   predictors = c("bathrooms", "surface_total", "surface_covered", "property_type"))
+
+# bathrooms
+full <- impute_var(full, "bathrooms",
+                   predictors = c("bedrooms", "surface_total", "surface_covered", "property_type"))
+
+# surface_covered
+full <- impute_var(full, "surface_covered",
+                   predictors = c("bedrooms", "bathrooms", "surface_total", "property_type"))
+
+# surface_total
+full <- impute_var(full, "surface_total",
+                   predictors = c("bedrooms", "bathrooms", "surface_covered", "property_type"))
+
+
+# Separar nuevamente train / test
+
+
+train_imputed <- full %>%
+  filter(dataset == "train") %>%
+  select(-dataset)
+
+test_imputed <- full %>%
+  filter(dataset == "test") %>%
+  select(-dataset)
+
+
+# Insertar imputaciones en bases originales
+
+
+train_final <- train_sf_clean %>%
+  mutate(
+    surface_total   = train_imputed$surface_total,
+    surface_covered = train_imputed$surface_covered,
+    bedrooms        = train_imputed$bedrooms,
+    bathrooms       = train_imputed$bathrooms
+  )
+
+test_final <- test_ready_osm_estrato %>%
+  mutate(
+    surface_total   = test_imputed$surface_total,
+    surface_covered = test_imputed$surface_covered,
+    bedrooms        = test_imputed$bedrooms,
+    bathrooms       = test_imputed$bathrooms
   )
 
 
-# Datos completos (para entrenar el imputador)
+```
 
+### Revisión final de datos y eliminación de variables no necesarias
 
-complete_rows <- full_data %>% 
-  drop_na(surface_total, surface_covered, bedrooms, bathrooms)
-
-# ==========================================
-# 4) Separación interna train/test para CV
-# ==========================================
-
-set.seed(2025)
-index_test <- sample(
-  1:nrow(complete_rows),
-  size = round(0.2 * nrow(complete_rows)),
-  replace = FALSE
+```{r}
+#Miramos que variables tenemos
+colnames(train_final)
+#Eliminamos variables innecesarias
+cols_to_drop <- c(
+  "codigo_lote_llave",
+  "text_bathrooms",
+  "text_bedrooms",
+  "text_surface"
 )
 
-db_train <- complete_rows[-index_test, ]
-db_test  <- complete_rows[index_test, ]
+train_final <- train_final %>% select(-any_of(cols_to_drop))
+test_final <- test_final%>% select(-any_of(cols_to_drop))
 
-# ==========================================
-# 5) Validación cruzada
-# ==========================================
 
-cv_folds <- vfold_cv(
-  data = db_train,
-  v = 5
+# Revisamos estructura de datos que coincida con lo que es: 
+str(train_final)
+
+#
+train_final$property_type <- as.factor(train_final$property_type)
+test_final$property_type <- as.factor(test_final$property_type)
+
+# 2. Lista de dummies
+dummy_vars <- c(
+  "has_parqueadero_garaje",
+  "has_seguridad",
+  "has_ascensor",
+  "has_gimnasio",
+  "has_piscina",
+  "has_bbq",
+  "has_salon_social",
+  "has_zona_infantil",
+  "has_balcon",
+  "has_terraza",
+  "has_patio",
+  "has_jardin_exterior",
+  "has_chimenea",
+  "has_cocina_integral",
+  "has_deposito",
+  "has_estudio",
+  "has_remodelado",
+  "has_vista",
+  "has_pisos_vivienda"
 )
+
+# Convertir dummies a factor
+train_final <- train_final %>% mutate(across(all_of(dummy_vars), ~as.factor(.)))
+test_final <- test_final %>% mutate(across(all_of(dummy_vars), ~as.factor(.)))
+
+# Redondear en train
+train_final <- train_final %>% 
+  mutate(
+    bathrooms = ifelse(!is.na(bathrooms), round(bathrooms), bathrooms),
+    bedrooms  = ifelse(!is.na(bedrooms),  round(bedrooms),  bedrooms)
+  )
+
+# Redondear en test
+test_final <- test_final %>% 
+  mutate(
+    bathrooms = ifelse(!is.na(bathrooms), round(bathrooms), bathrooms),
+    bedrooms  = ifelse(!is.na(bedrooms),  round(bedrooms),  bedrooms)
+  )
+
+# Ruta dinámica
+
+
+output_dir <- here::here("data", "processed")
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+write.csv(train_final,
+          file.path(output_dir, "train_final.csv"),
+          row.names = FALSE)
+
+write.csv(test_final,
+          file.path(output_dir, "test_final.csv"),
+          row.names = FALSE)
+
 
 
 ```
+
 
 
 ```{r}
