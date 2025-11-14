@@ -574,14 +574,16 @@ library(osmextract)
 
 # RUTA Y ÁREA DE INTERÉS
 
+# PBF (Protocolbuffer Binary Format) es el formato comprimido de OSM - OpenStreetMap.
 file_pbf <- here::here("data", "external", "colombia-251111.osm.pbf")
 
+# delimitar area geografica a Bogotá
 bbox_bogota <- st_bbox(c(
   xmin = -74.35, xmax = -73.9,
   ymin = 4.45,  ymax = 4.85
 ), crs = 4326)
 
-#  LECTURA SEGURA DE CAPAS OSM
+#  LECTURA SEGURA DE CAPAS OSM - OpenStreetMap.
 
 extract_tag <- function(df, key) {
   if (!is.null(df) && !"other_tags" %in% names(df)) return(df)
@@ -593,9 +595,9 @@ extract_tag <- function(df, key) {
 }
 
 # Aplicar extracción a todas las capas antes del filtrado
-points <- extract_tag(points, "leisure")
-polys  <- extract_tag(polys,  "leisure")
-lines  <- extract_tag(lines,  "leisure")
+points <- extract_tag(points, "leisure") #Puntos de interes con atributos
+polys  <- extract_tag(polys,  "leisure") #Puntos de interes que son areas
+lines  <- extract_tag(lines,  "leisure") #Puntos de interes lineales
 
 points <- extract_tag(points, "landuse")
 polys  <- extract_tag(polys,  "landuse")
@@ -605,7 +607,7 @@ points <- extract_tag(points, "amenity")
 polys  <- extract_tag(polys,  "amenity")
 lines  <- extract_tag(lines,  "amenity")
 
-# Función general (igual que antes)
+# Función general
 get_poi_all <- function(points, polys, lines, key, values) {
   capas <- list(points, polys, lines)
   pois <- purrr::map_dfr(capas, function(x) {
@@ -616,7 +618,7 @@ get_poi_all <- function(points, polys, lines, key, values) {
   pois
 }
 
-# --- Crear lista de POIs con criterios extendidos ---
+# Crear lista de POIs con criterios extendidos ---
 pois_list <- list(
   parques = bind_rows(
     get_poi_all(points, polys, lines, "leisure",
