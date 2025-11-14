@@ -595,14 +595,17 @@ extract_tag <- function(df, key) {
 }
 
 # Aplicar extracción a todas las capas antes del filtrado
+#leisure: lugares de recreación y entretenimiento.
 points <- extract_tag(points, "leisure") #Puntos de interes con atributos
 polys  <- extract_tag(polys,  "leisure") #Puntos de interes que son areas
 lines  <- extract_tag(lines,  "leisure") #Puntos de interes lineales
 
+#landuse: uso del suelo
 points <- extract_tag(points, "landuse")
 polys  <- extract_tag(polys,  "landuse")
 lines  <- extract_tag(lines,  "landuse")
 
+#amenity: Servicios y equipamientos disponibles para el público.
 points <- extract_tag(points, "amenity")
 polys  <- extract_tag(polys,  "amenity")
 lines  <- extract_tag(lines,  "amenity")
