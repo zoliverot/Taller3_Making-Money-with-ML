@@ -1307,7 +1307,7 @@ extract_from_text <- function(text) {
   habs <- as.numeric(str_extract(habs, "\\d+"))
   
   # área total
-  area <- str_extract(txt, "(\\d+)\\s*(m2|metros|mts)")
+  area <- str_extract(txt, "(\\d+)\\s*(m2|metros|m|mt|mts)")
   area <- as.numeric(str_extract(area, "\\d+"))
   
   tibble(
