@@ -31,9 +31,9 @@ pacman::p_loaded()
 ## Cargar  bases de datos principales
 ```{r}
 #Base de datos test
-test <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/test.csv")
+test <- read_csv("C:/Users/laura/OneDrive/Documentos/MAESTRIA EN ECONOMIA APLICADA/2025-02/BIG DATA Y MACHINE LEARNING/Taller 3/Taller3_Making-Money-with-ML/data/test.csv")
 ##Base de datos train
-train <- read_csv("https://raw.githubusercontent.com/cristianmu910/datos-taller-3/main/train.csv")
+train <- read_csv("C:/Users/laura/OneDrive/Documentos/MAESTRIA EN ECONOMIA APLICADA/2025-02/BIG DATA Y MACHINE LEARNING/Taller 3/Taller3_Making-Money-with-ML/data/train.csv")
 ```
 
 
@@ -1564,13 +1564,12 @@ saveRDS(
   file.path(output_dir, "test_final.rds")
 )
 
+
 ```
 
 
 
 ```{r}
-
-
 # ===============================
 # 7) Distribuciones (gráficos sencillos)
 # ===============================
