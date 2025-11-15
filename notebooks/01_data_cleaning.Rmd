@@ -54,7 +54,7 @@ target <- "price"
 
 ```
 
-## Exploración  y manipulación de datos principales 
+## Exploración  y manipulación de datos del train y test
 
 ```{r}
 
@@ -368,7 +368,6 @@ token_diccionario <- list(
 # Función robusta
 
 add_text_dummies <- function(df, dicc = token_diccionario) {
-  cat("\n>>> Iniciando función add_text_dummies()\n")
 
   # Asegurar tipo base data.frame
   df <- as.data.frame(df)
@@ -556,6 +555,10 @@ test_ready  <- add_best_vars(test_txt,  best_vars)
 
 ```{r}
 
+
+
+
+
 # CONFIGURACIÓN GENERAL
 
 options(timeout = 1800)
@@ -570,6 +573,36 @@ library(units)
 library(here)
 library(osmextract)
 
+
+# Verificar si existen archivos procesados
+
+train_ready_osm <- "outputs/train_ready_osm.rds"
+test_ready_osm  <- "outputs/test_ready_osm.rds"
+lines <- "outputs/lines.rds"
+polys <- "outputs/polys.rds"
+points<- "outputs/points.rds"
+barrios<-"outputs/barrios.rds"
+localidades<-"outputs/localidades.rds"
+pois_sf <- "outputs/pois_sf.rds"
+
+if (file.exists(train_ready_osm) & file.exists(test_ready_osm) & file.exists(polys) & file.exists(lines) & file.exists(barrios) & file.exists(points) & file.exists(localidades) & file.exists(pois_sf)) {
+
+  train_ready_osm <- readRDS(train_ready_osm)
+  test_ready_osm  <- readRDS(test_ready_osm)
+  points <- readRDS(points)
+  polys  <- readRDS(polys)
+  lines <- readRDS(lines)
+  barrios <- readRDS(barrios)
+  localidades <- readRDS(localidades)
+  pois_sf <- readRDS(pois_sf)
+
+} else {
+
+
+
+
+
+
 # RUTA Y ÁREA DE INTERÉS
 
 # PBF (Protocolbuffer Binary Format) es el formato comprimido de OSM - OpenStreetMap.
@@ -581,14 +614,10 @@ bbox_bogota <- st_bbox(c(
   ymin = 4.45,  ymax = 4.85
 ), crs = 4326)
 
-<<<<<<< HEAD
+
 #  LECTURA SEGURA DE CAPAS OSM - OpenStreetMap.
-=======
-
-
 
 #  LECTURA SEGURA DE CAPAS OSM
->>>>>>> c256b2b01fbbf419d4eb9549096bc3755d8a131e
 
 extract_tag <- function(df, key) {
   if (!is.null(df) && !"other_tags" %in% names(df)) return(df)
@@ -615,9 +644,8 @@ points <- extract_tag(points, "amenity")
 polys  <- extract_tag(polys,  "amenity")
 lines  <- extract_tag(lines,  "amenity")
 
-<<<<<<< HEAD
+
 # Función general
-=======
 
 
 #EXTRAER BARRIOS Y LOCALIDADES
@@ -632,8 +660,8 @@ barrios <- polys %>%
   rename(barrio = name)
 
 
-# Función general (igual que antes)
->>>>>>> c256b2b01fbbf419d4eb9549096bc3755d8a131e
+# Función general
+
 get_poi_all <- function(points, polys, lines, key, values) {
   capas <- list(points, polys, lines)
   pois <- purrr::map_dfr(capas, function(x) {
@@ -688,7 +716,6 @@ calc_min_dist <- function(x, y) {
 }
 
 for (nm in names(pois_sf)) {
-  message("📏 Calculando distancia a ", nm, " ...")
   train_sf[[paste0("dist_", nm)]] <- calc_min_dist(train_sf, pois_sf[[nm]])
   test_sf [[paste0("dist_", nm)]] <- calc_min_dist(test_sf , pois_sf[[nm]])
 }
@@ -721,7 +748,10 @@ saveRDS(lines,  "outputs/lines.rds")
 saveRDS(points, "outputs/points.rds")
 saveRDS(barrios, "outputs/barrios.rds")
 saveRDS(localidades,  "outputs/localidades.rds")
-saveRDS(pois_list, "outputs/pois_list.rds")
+saveRDS(pois_sf, "outputs/pois_sf.rds")
+
+
+}
 
 ```
 
@@ -1084,7 +1114,6 @@ test_sf_final  <- test_sf_join
 La capa de parques se encontraba dañada por ende, en el siguiente bloque de codigo se repara:
 
 ```{r}
-
 
 
 # Función que extrae tags desde other_tags (si no existen)
