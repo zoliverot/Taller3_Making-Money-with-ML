@@ -443,9 +443,7 @@ colMeans(dplyr::select(test_txt,  starts_with("has_")), na.rm = TRUE)
 # Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
 
 ```{r}
-library(dplyr)
-library(purrr)
-library(scales)
+
 
 
 # Función para evaluar variables binarias vs. precio
@@ -581,6 +579,9 @@ bbox_bogota <- st_bbox(c(
   ymin = 4.45,  ymax = 4.85
 ), crs = 4326)
 
+
+
+
 #  LECTURA SEGURA DE CAPAS OSM
 
 extract_tag <- function(df, key) {
@@ -604,6 +605,20 @@ lines  <- extract_tag(lines,  "landuse")
 points <- extract_tag(points, "amenity")
 polys  <- extract_tag(polys,  "amenity")
 lines  <- extract_tag(lines,  "amenity")
+
+
+
+#EXTRAER BARRIOS Y LOCALIDADES
+localidades <- polys %>%
+  filter(admin_level == "8") %>%
+  select(name) %>%
+  rename(localidad = name)
+
+barrios <- polys %>%
+  filter(admin_level == "10" | place == "neighbourhood") %>%
+  select(name) %>%
+  rename(barrio = name)
+
 
 # Función general (igual que antes)
 get_poi_all <- function(points, polys, lines, key, values) {
@@ -691,7 +706,9 @@ saveRDS(test_ready_osm,  "outputs/test_ready_osm.rds")
 saveRDS(polys, "outputs/polys.rds")
 saveRDS(lines,  "outputs/lines.rds")
 saveRDS(points, "outputs/points.rds")
-
+saveRDS(barrios, "outputs/barrios.rds")
+saveRDS(localidades,  "outputs/localidades.rds")
+saveRDS(pois_list, "outputs/pois_list.rds")
 
 ```
 
@@ -1444,6 +1461,28 @@ test_final <- test_final %>%
   )
 
 #Exportar
+
+
+# 1. Transformar de CRS métrico (3116) a geográfico (4326)
+train_final <- st_transform(train_final, 4326)
+test_final  <- st_transform(test_final, 4326)
+
+# 2. Extraer coordenadas lon/lat
+train_coords <- st_coordinates(train_final)
+test_coords  <- st_coordinates(test_final)
+
+train_final$lon <- train_coords[, "X"]
+train_final$lat <- train_coords[, "Y"]
+
+test_final$lon <- test_coords[, "X"]
+test_final$lat <- test_coords[, "Y"]
+
+# 3. Convertir a data frame eliminando la geometría
+train_final_df <- train_final %>% st_drop_geometry()
+test_final_df  <- test_final  %>% st_drop_geometry()
+
+
+
 
 # Ruta dinámica
 
