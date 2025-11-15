@@ -443,9 +443,7 @@ colMeans(dplyr::select(test_txt,  starts_with("has_")), na.rm = TRUE)
 # Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
 
 ```{r}
-library(dplyr)
-library(purrr)
-library(scales)
+
 
 
 # Función para evaluar variables binarias vs. precio
@@ -583,7 +581,14 @@ bbox_bogota <- st_bbox(c(
   ymin = 4.45,  ymax = 4.85
 ), crs = 4326)
 
+<<<<<<< HEAD
 #  LECTURA SEGURA DE CAPAS OSM - OpenStreetMap.
+=======
+
+
+
+#  LECTURA SEGURA DE CAPAS OSM
+>>>>>>> c256b2b01fbbf419d4eb9549096bc3755d8a131e
 
 extract_tag <- function(df, key) {
   if (!is.null(df) && !"other_tags" %in% names(df)) return(df)
@@ -610,7 +615,25 @@ points <- extract_tag(points, "amenity")
 polys  <- extract_tag(polys,  "amenity")
 lines  <- extract_tag(lines,  "amenity")
 
+<<<<<<< HEAD
 # Función general
+=======
+
+
+#EXTRAER BARRIOS Y LOCALIDADES
+localidades <- polys %>%
+  filter(admin_level == "8") %>%
+  select(name) %>%
+  rename(localidad = name)
+
+barrios <- polys %>%
+  filter(admin_level == "10" | place == "neighbourhood") %>%
+  select(name) %>%
+  rename(barrio = name)
+
+
+# Función general (igual que antes)
+>>>>>>> c256b2b01fbbf419d4eb9549096bc3755d8a131e
 get_poi_all <- function(points, polys, lines, key, values) {
   capas <- list(points, polys, lines)
   pois <- purrr::map_dfr(capas, function(x) {
@@ -696,7 +719,9 @@ saveRDS(test_ready_osm,  "outputs/test_ready_osm.rds")
 saveRDS(polys, "outputs/polys.rds")
 saveRDS(lines,  "outputs/lines.rds")
 saveRDS(points, "outputs/points.rds")
-
+saveRDS(barrios, "outputs/barrios.rds")
+saveRDS(localidades,  "outputs/localidades.rds")
+saveRDS(pois_list, "outputs/pois_list.rds")
 
 ```
 
@@ -1449,6 +1474,41 @@ test_final <- test_final %>%
   )
 
 #Exportar
+
+
+# Transformar a geográfico
+train_final <- st_transform(train_final, 4326)
+test_final  <- st_transform(test_final, 4326)
+
+# Extraer coordenadas
+train_xy <- st_coordinates(train_final)
+test_xy  <- st_coordinates(test_final)
+
+# Asegurar que las variables queden correctas:
+# X = longitud
+# Y = latitud
+train_final$longitude <- train_xy[, "X"]
+train_final$latitude  <- train_xy[, "Y"]
+
+test_final$longitude <- test_xy[, "X"]
+test_final$latitude  <- test_xy[, "Y"]
+
+# Eliminar geometría
+train_final <- train_final %>% st_drop_geometry()
+test_final  <- test_final  %>% st_drop_geometry()
+
+fix_lon_lat <- function(df) {
+  lon <- df$latitude
+  lat <- df$longitude
+  df$longitude <- lon
+  df$latitude  <- lat
+  df
+}
+
+train_final<- fix_lon_lat(train_final)
+test_final  <- fix_lon_lat(test_final)
+
+
 
 # Ruta dinámica
 
