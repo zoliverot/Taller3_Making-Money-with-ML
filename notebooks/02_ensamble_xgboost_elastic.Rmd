@@ -1,0 +1,412 @@
+---
+### **Propósito:** Crear variables nuevas (texto y externas, mínimo 8).
+```
+---
+title: "02 - Ensamble_xgboost_elastic"
+output: html_document
+---
+
+```{r}
+source("../origen/config.R")
+source("../origen/data_utils.R")
+```
+
+##Librerías
+
+```{r setup, include=FALSE}
+
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, glmnet, xgboost, ranger
+)
+
+
+
+# Verificar paquetes cargados
+pacman::p_loaded()
+```
+
+
+
+```{r}
+
+#Bases de datos 
+test_final <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/test_final.rds"))
+
+train_final <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/train_final.rds"))
+
+
+
+```
+
+Convertimos a factor
+```{r}
+# Convertir factores
+train_learner <- train_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+test_learner <- test_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+
+binary_vars <- c(
+  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
+  "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
+  "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito",
+  "has_estudio","has_remodelado","has_vista"
+)
+
+train_learner[binary_vars] <- lapply(train_learner[binary_vars], as.numeric)
+test_learner[binary_vars]  <- lapply(test_learner[binary_vars],  as.numeric)
+
+# Quitar columnas indeseadas
+vars_remove <- c("has_pisos_vivienda", "has_salon_social")
+
+train_learner <- train_learner %>% select(-all_of(vars_remove))
+test_learner  <- test_learner  %>% select(-all_of(vars_remove))
+
+# Buscar factores con un solo nivel en train
+single_train <- names(
+  Filter(
+    function(v) is.factor(train_learner[[v]]) &&
+      length(unique(train_learner[[v]])) == 1,
+    names(train_learner)
+  )
+)
+
+# Buscar factores con un solo nivel en test
+single_test <- names(
+  Filter(
+    function(v) is.factor(test_learner[[v]]) &&
+      length(unique(test_learner[[v]])) == 1,
+    names(test_learner)
+  )
+)
+
+single_train
+single_test
+
+```
+## Versión 1 
+
+```{r}
+
+set.seed(123)
+
+
+# Fórmula SIN interacciones (recipe las crea)
+
+
+sl <- as.formula(
+  price ~ 
+    surface_total + surface_covered  + bedrooms + bathrooms +
+    property_type  + month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + has_gimnasio + has_piscina +
+    has_bbq  + has_zona_infantil + has_balcon + has_terraza +
+    has_patio + has_jardin_exterior + has_chimenea + has_cocina_integral +
+    has_deposito + has_estudio + has_remodelado + has_vista  +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    + estrato
+)
+
+#  Unificar niveles
+
+
+for (v in names(train_learner)) {
+  if (is.factor(train_learner[[v]])) {
+    lvls <- union(levels(train_learner[[v]]), levels(test_learner[[v]]))
+    train_learner[[v]] <- factor(train_learner[[v]], levels = lvls)
+    test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
+  }
+}
+
+
+# EXTRAER nombres dummies
+
+
+rec_basic <- recipe(sl, data = train_learner) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE)
+
+prep_basic <- prep(rec_basic)
+
+vars <- names(bake(prep_basic, train_learner))
+
+year_dums  <- grep("^year_", vars, value = TRUE)
+ptype_dums <- grep("^property_type_", vars, value = TRUE)
+amenities  <- c("has_seguridad","has_balcon","has_piscina","has_gimnasio")
+
+
+# RECETA FINAL ROBUSTA
+
+rec <- recipe(sl, data = train_learner) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+
+  # Interacciones pandemia
+  step_interact(
+    terms = as.formula(
+      paste0("~ (", paste(year_dums, collapse="+"), 
+             "):(dist_parques + dist_restaurantes + dist_centros_comerciales)")
+    )
+  ) %>%
+
+  # Interacciones propiedad × amenidades
+  step_interact(
+    terms = as.formula(
+      paste0("~ (", paste(ptype_dums, collapse = "+"), 
+             "):(", paste(amenities, collapse="+"), ")")
+    )
+  ) %>%
+
+  # Eliminar columnas constantes
+  step_zv(all_predictors()) %>%
+
+  # Anti-colinealidad
+  step_corr(all_predictors(), threshold = 0.80) %>%     # quitar variables muy correlacionadas
+  step_lincomb(all_predictors())                        # quitar combinaciones lineales
+
+prep_rec <- prep(rec, training = train_learner, retain = TRUE)
+
+
+# Matrices finales
+
+
+train_mat <- bake(prep_rec, new_data = train_learner)
+test_mat  <- bake(prep_rec, new_data = test_learner)
+
+X_train <- train_mat %>% select(-price)
+y_train <- train_mat$price
+
+# Alinear columnas
+X_test <- test_mat %>% select(colnames(X_train))
+
+
+# CV
+
+
+K <- 10
+N <- nrow(train_mat)
+fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
+cv_control <- list(V = K, validRows = fold_indices)
+
+
+# Modelos base REGULARIZADOS
+
+
+# Ranger regularizado
+SL.ranger.reg <- function(...) {
+  SL.ranger(...,
+    num.trees = 300,
+    mtry = max(2, floor(ncol(X_train) * 0.15)),
+    min.node.size = 10,
+    sample.fraction = 0.7
+  )
+}
+
+# XGBoost regularizado
+SL.xgboost.reg <- function(..., nrounds = 300) {
+  SL.xgboost(...,
+    nrounds = nrounds,
+    max_depth = 3,
+    eta = 0.05,
+    subsample = 0.7,
+    colsample_bytree = 0.7,
+    min_child_weight = 5,
+    gamma = 1,
+    lambda = 2
+  )
+}
+
+mix <- c(
+  "SL.glmnet",       # en vez de SL.lm → evita rank deficiency
+  "SL.mean",
+  "SL.ranger.reg",
+  "SL.xgboost.reg"
+)
+
+# Entrenar modelo
+
+sl_fit <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS", 
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+
+# Predicciones Test
+
+
+test_prediccion <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+test_results <- test_learner %>% mutate(price = test_prediccion)
+
+
+# Guardar
+
+
+sl_xgboost_ranger_01 <- test_results %>% 
+  select(property_id, price)
+
+write.csv(
+  sl_xgboost_ranger_01,
+  here("outputs", "kaggle_submissions", "sl_xgboost_ranger_01.csv"),
+  row.names = FALSE
+)
+```
+
+
+## Versión 2 
+
+
+```{r}
+
+
+set.seed(123)
+
+
+# FILTRAR SOLO APARTAMENTOS
+
+
+train_apto <- train_learner %>% 
+  filter(property_type == "Apartamento")
+
+test_apto <- test_learner  # test: 94% son apartamentos
+
+
+#  Variables categóricas a factor
+
+
+factors_to_fix <- c("month", "year", "localidad", "estrato")
+
+amenities <- c(
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor", "has_gimnasio",
+  "has_piscina", "has_bbq", "has_zona_infantil", "has_balcon", "has_terraza",
+  "has_patio", "has_jardin_exterior", "has_chimenea", "has_cocina_integral",
+  "has_deposito", "has_estudio", "has_remodelado", "has_vista"
+)
+
+train_apto[amenities] <- lapply(train_apto[amenities], as.numeric)
+test_apto[amenities]  <- lapply(test_apto[amenities],  as.numeric)
+
+
+train_apto[factors_to_fix] <- lapply(train_apto[factors_to_fix], factor)
+test_apto[factors_to_fix]  <- lapply(test_apto[factors_to_fix],  factor)
+
+# Unificar niveles
+for (v in factors_to_fix) {
+  lvls <- union(levels(train_apto[[v]]), levels(test_apto[[v]]))
+  train_apto[[v]] <- factor(train_apto[[v]], levels = lvls)
+  test_apto[[v]]  <- factor(test_apto[[v]],  levels = lvls)
+}
+
+# 3. FORMULA (SIN INTERACCIONES MASIVAS)
+
+
+sl <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + 
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito + 
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+   estrato
+)
+
+
+# RECETA ESTABLE + INTERACCIÓN PANDEMIA × PARQUES
+
+
+rec <- recipe(sl, data = train_apto) %>%
+  
+  # SOLO dummificar factores reales
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  # Interacción pandemia
+  step_interact(
+    terms = ~ starts_with("year_") : dist_parques
+  ) %>%
+  
+  # Eliminar columnas constantes
+  step_zv(all_predictors())
+
+prep_rec <- prep(rec)
+
+X_train <- bake(prep_rec, train_apto) %>% select(-price)
+y_train <- train_apto$price
+X_test  <- bake(prep_rec, test_apto)
+
+
+#  SuperLearner — MODELOS ESTABLES
+
+
+mix <- c(
+  "SL.lm",
+  "SL.ranger",
+  "SL.mean"        # muy estable, evita explosiones
+)
+
+# Folds
+K <- 5
+N <- nrow(train_apto)
+fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
+cv_control <- list(V = K, validRows = fold_indices)
+
+# Entrenar
+sl_fit <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+# Predicción final
+
+
+test_prediccion <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+
+# Predicción consistente, sin negativos
+test_prediccion <- pmax(test_prediccion, 1)
+
+
+# Construir archivo Kaggle
+
+
+sl_ranger_lm_02 <- test_apto %>%
+  select(property_id) %>%
+  mutate(price = test_prediccion)
+
+# Guardar
+write.csv(
+  sl_ranger_lm_02,
+  here("outputs", "kaggle_submissions", "sl_ranger_lm_02.csv"),
+  row.names = FALSE
+)
+
+
+
+
+```
+
+
