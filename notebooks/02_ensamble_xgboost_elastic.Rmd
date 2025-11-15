@@ -1,0 +1,246 @@
+---
+### **Propósito:** Crear variables nuevas (texto y externas, mínimo 8).
+```
+---
+title: "02 - Ensamble_xgboost_elastic"
+output: html_document
+---
+
+```{r}
+source("../origen/config.R")
+source("../origen/data_utils.R")
+```
+
+##Librerías
+
+```{r setup, include=FALSE}
+
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes
+)
+
+
+
+# Verificar paquetes cargados
+pacman::p_loaded()
+```
+
+
+
+```{r}
+
+#Bases de datos 
+test_final <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/test_final.rds"))
+
+train_final <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/train_final.rds"))
+
+
+
+```
+
+Convertimos a factor
+```{r}
+# Convertir factores
+train_learner <- train_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+test_learner <- test_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+
+binary_vars <- c(
+  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
+  "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
+  "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito",
+  "has_estudio","has_remodelado","has_vista"
+)
+
+train_learner[binary_vars] <- lapply(train_learner[binary_vars], as.numeric)
+test_learner[binary_vars]  <- lapply(test_learner[binary_vars],  as.numeric)
+
+# Quitar columnas indeseadas
+vars_remove <- c("has_pisos_vivienda", "has_salon_social")
+
+train_learner <- train_learner %>% select(-all_of(vars_remove))
+test_learner  <- test_learner  %>% select(-all_of(vars_remove))
+
+# Buscar factores con un solo nivel en train
+single_train <- names(
+  Filter(
+    function(v) is.factor(train_learner[[v]]) &&
+      length(unique(train_learner[[v]])) == 1,
+    names(train_learner)
+  )
+)
+
+# Buscar factores con un solo nivel en test
+single_test <- names(
+  Filter(
+    function(v) is.factor(test_learner[[v]]) &&
+      length(unique(test_learner[[v]])) == 1,
+    names(test_learner)
+  )
+)
+
+single_train
+single_test
+
+```
+
+```{r}
+
+
+library(tidyverse)
+library(recipes)
+library(SuperLearner)
+library(glmnet)
+library(xgboost)
+library(ranger)
+
+set.seed(123)
+
+# ============================================================
+# 1. Fórmula SIN interacciones (recipes las crea)
+# ============================================================
+
+sl <- as.formula(
+  price ~ 
+    surface_total + surface_covered  + bedrooms + bathrooms +
+    property_type  + month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + has_gimnasio + has_piscina +
+    has_bbq  + has_zona_infantil + has_balcon + has_terraza +
+    has_patio + has_jardin_exterior + has_chimenea + has_cocina_integral +
+    has_deposito + has_estudio + has_remodelado + has_vista  +
+    dist_parques + dist_colegios + dist_restaurantes + 
+    dist_autopistas + dist_centros_comerciales +
+    localidad + estrato
+)
+
+# ============================================================
+# 2. Unificar niveles de factores
+# ============================================================
+
+for (v in names(train_learner)) {
+  if (is.factor(train_learner[[v]])) {
+    lvls <- union(levels(train_learner[[v]]), levels(test_learner[[v]]))
+    train_learner[[v]] <- factor(train_learner[[v]], levels = lvls)
+    test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
+  }
+}
+
+# ============================================================
+# 3. PRIMERA PARTE: receta básica sin interacciones
+# ============================================================
+
+rec_base <- recipe(sl, data = train_learner) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+
+prep_base <- prep(rec_base)
+
+# ============================================================
+# 4. Identificar dummies para interacciones
+# ============================================================
+
+train_dummy_names <- bake(prep_base, train_learner) %>% names()
+
+year_dums <- grep("^year_", train_dummy_names, value = TRUE)
+ptype_dums <- grep("^property_type_", train_dummy_names, value = TRUE)
+
+# Amenidades
+amenities <- c("has_seguridad","has_balcon","has_piscina","has_gimnasio")
+
+# ============================================================
+# 5. RECETA FINAL con interacciones dinámicas y correctas
+# ============================================================
+
+rec <- recipe(sl, data = train_learner) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_interact(
+    terms = as.formula(
+      paste0("~ (", paste(year_dums, collapse = "+"), 
+             ") : (dist_parques + dist_restaurantes + dist_centros_comerciales)")
+    )
+  ) %>%
+  step_interact(
+    terms = as.formula(
+      paste0("~ (", paste(ptype_dums, collapse = "+"), 
+             ") : (", paste(amenities, collapse = "+"), ")")
+    )
+  ) %>%
+  step_zv(all_predictors())
+
+prep_rec <- prep(rec)
+
+# ============================================================
+# 6. Matrices finales
+# ============================================================
+
+X_train <- bake(prep_rec, train_learner) %>% select(-price)
+y_train <- train_learner$price
+
+X_test <- bake(prep_rec, test_learner)
+
+# ============================================================
+# 7. Folds
+# ============================================================
+
+K <- 5
+N <- nrow(train_learner)
+fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
+
+cv_control <- list(V = K, validRows = fold_indices)
+
+# ============================================================
+# 8. Biblioteca
+# ============================================================
+
+mix <- c("SL.lm", "SL.ranger", "SL.xgboost", "SL.glmnet", "SL.mean")
+
+# ============================================================
+# 9. Entrenar SuperLearner
+# ============================================================
+
+sl_fit <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+# ============================================================
+# 10. Predicción test
+# ============================================================
+
+test_prediccion <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+
+test_results <- test_learner %>% mutate(price = test_prediccion)
+
+# ============================================================
+# 11. Guardado
+# ============================================================
+
+write.csv(test_results, "test_superlearner_results.csv", row.names = FALSE)
+saveRDS(sl_fit, "superlearner_model.rds")
+saveRDS(test_results, "test_superlearner_results.rds")
+
+
+```
+
