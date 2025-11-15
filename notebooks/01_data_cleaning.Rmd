@@ -1463,24 +1463,37 @@ test_final <- test_final %>%
 #Exportar
 
 
-# 1. Transformar de CRS métrico (3116) a geográfico (4326)
+# Transformar a geográfico
 train_final <- st_transform(train_final, 4326)
 test_final  <- st_transform(test_final, 4326)
 
-# 2. Extraer coordenadas lon/lat
-train_coords <- st_coordinates(train_final)
-test_coords  <- st_coordinates(test_final)
+# Extraer coordenadas
+train_xy <- st_coordinates(train_final)
+test_xy  <- st_coordinates(test_final)
 
-train_final$lon <- train_coords[, "X"]
-train_final$lat <- train_coords[, "Y"]
+# Asegurar que las variables queden correctas:
+# X = longitud
+# Y = latitud
+train_final$longitude <- train_xy[, "X"]
+train_final$latitude  <- train_xy[, "Y"]
 
-test_final$lon <- test_coords[, "X"]
-test_final$lat <- test_coords[, "Y"]
+test_final$longitude <- test_xy[, "X"]
+test_final$latitude  <- test_xy[, "Y"]
 
-# 3. Convertir a data frame eliminando la geometría
-train_final_df <- train_final %>% st_drop_geometry()
-test_final_df  <- test_final  %>% st_drop_geometry()
+# Eliminar geometría
+train_final <- train_final %>% st_drop_geometry()
+test_final  <- test_final  %>% st_drop_geometry()
 
+fix_lon_lat <- function(df) {
+  lon <- df$latitude
+  lat <- df$longitude
+  df$longitude <- lon
+  df$latitude  <- lat
+  df
+}
+
+train_final<- fix_lon_lat(train_final)
+test_final  <- fix_lon_lat(test_final)
 
 
 
