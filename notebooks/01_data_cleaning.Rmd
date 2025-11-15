@@ -1284,11 +1284,19 @@ plot(st_geometry(buffer_chapinero), add = TRUE, border = "red", lwd = 2)
 ### Manipulación valores faltantes 
 
 ```{r}
+library(tidyverse)
+library(sf)
+library(recipes)
+library(tidymodels)
+library(stringr)
 
-#Primero intentamos extraer información de la descripcion 
+# Función: Extraer info del texto
+
 extract_from_text <- function(text) {
   
-  txt <- tolower(text)
+  # Manejar NAs
+  text <- ifelse(is.na(text), "", text)
+  txt  <- tolower(text)
   
   # baños
   baños <- str_extract(txt, "(\\d+)\\s*(baños|banos|baño|bano)")
@@ -1303,27 +1311,53 @@ extract_from_text <- function(text) {
   area <- as.numeric(str_extract(area, "\\d+"))
   
   tibble(
-    text_bathrooms  = baños,
-    text_bedrooms   = habs,
-    text_surface    = area
+    text_bathrooms = baños,
+    text_bedrooms  = habs,
+    text_surface   = area
   )
 }
 
+
+# Extraer variables desde texto (AMBAS BASES)
 train_text_features <- extract_from_text(train_sf_clean$description)
 test_text_features  <- extract_from_text(test_ready_osm_estrato$description)
 
-# Añadir estas variables
+# 3. Unir columnas con sf SIN ROMPER la geometría
 
-train_sf_clean <- bind_cols(train_sf_clean, train_text_features)
-test_ready_osm_estrato <- bind_cols(test_ready_osm_estrato, test_text_features)
 
+train_geom <- st_geometry(train_sf_clean)
+test_geom  <- st_geometry(test_ready_osm_estrato)
+
+train_sf_clean <- train_sf_clean %>%
+  st_drop_geometry() %>%
+  bind_cols(train_text_features) %>%
+  st_set_geometry(train_geom)
+
+test_ready_osm_estrato <- test_ready_osm_estrato %>%
+  st_drop_geometry() %>%
+  bind_cols(test_text_features) %>%
+  st_set_geometry(test_geom)
+
+
+#  Rellenar desde texto
 
 fill_from_text <- function(df) {
+  
+  # Si por alguna razón no existen, crearlas
+  if (!"text_bathrooms" %in% names(df)) df$text_bathrooms <- NA_real_
+  if (!"text_bedrooms"  %in% names(df)) df$text_bedrooms  <- NA_real_
+  if (!"text_surface"   %in% names(df)) df$text_surface   <- NA_real_
+  
   df %>%
     mutate(
-      bathrooms = ifelse(is.na(bathrooms) & !is.na(text_bathrooms), text_bathrooms, bathrooms),
-      bedrooms  = ifelse(is.na(bedrooms)  & !is.na(text_bedrooms),  text_bedrooms,  bedrooms),
-      surface_total = ifelse(is.na(surface_total) & !is.na(text_surface), text_surface, surface_total)
+      bathrooms = ifelse(is.na(bathrooms) & !is.na(text_bathrooms),
+                         text_bathrooms, bathrooms),
+      
+      bedrooms  = ifelse(is.na(bedrooms) & !is.na(text_bedrooms),
+                         text_bedrooms, bedrooms),
+      
+      surface_total = ifelse(is.na(surface_total) & !is.na(text_surface),
+                             text_surface, surface_total)
     )
 }
 
@@ -1331,7 +1365,30 @@ train_sf_clean <- fill_from_text(train_sf_clean)
 test_ready_osm_estrato <- fill_from_text(test_ready_osm_estrato)
 
 
-# Extraer variables a imputar (sin geometría)
+# PASO INTERMEDIO: surface_total <-> surface_covered
+
+
+mutual_surface_fix <- function(df) {
+  df %>%
+    mutate(
+      surface_total = ifelse(
+        is.na(surface_total) & !is.na(surface_covered),
+        surface_covered, surface_total
+      ),
+      
+      surface_covered = ifelse(
+        is.na(surface_covered) & !is.na(surface_total),
+        surface_total, surface_covered
+      )
+    )
+}
+
+train_sf_clean <- mutual_surface_fix(train_sf_clean)
+test_ready_osm_estrato <- mutual_surface_fix(test_ready_osm_estrato)
+
+
+#  Preparar dataset para imputación con modelos
+
 
 train_imp <- train_sf_clean %>%
   st_drop_geometry() %>%
@@ -1341,17 +1398,13 @@ test_imp <- test_ready_osm_estrato %>%
   st_drop_geometry() %>%
   select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
 
-
-# Unir datos para imputación consistente
-
-
 full <- bind_rows(
   train_imp %>% mutate(dataset = "train"),
   test_imp  %>% mutate(dataset = "test")
 )
 
 
-# Función general de imputación
+# Función de imputación con Random Forest
 
 
 impute_var <- function(data, target, predictors) {
@@ -1374,48 +1427,37 @@ impute_var <- function(data, target, predictors) {
   wf <- workflow() %>% add_recipe(rec) %>% add_model(mod)
   
   fit_mod <- fit(wf, complete_rows)
-  
-  preds <- predict(fit_mod, missing_rows) %>% pull(.pred)
+  preds   <- predict(fit_mod, missing_rows) %>% pull(.pred)
   
   df[[target]][is.na(df[[target]])] <- preds
-  
   df
 }
 
 
-# Imputación encadenada
+# IMPUTACIÓN ENCADENADA
 
 
-# bedrooms
 full <- impute_var(full, "bedrooms",
                    predictors = c("bathrooms", "surface_total", "surface_covered", "property_type"))
 
-# bathrooms
 full <- impute_var(full, "bathrooms",
                    predictors = c("bedrooms", "surface_total", "surface_covered", "property_type"))
 
-# surface_covered
 full <- impute_var(full, "surface_covered",
                    predictors = c("bedrooms", "bathrooms", "surface_total", "property_type"))
 
-# surface_total
 full <- impute_var(full, "surface_total",
                    predictors = c("bedrooms", "bathrooms", "surface_covered", "property_type"))
 
 
-# Separar nuevamente train / test
+# Separar train/test imputado
 
 
-train_imputed <- full %>%
-  filter(dataset == "train") %>%
-  select(-dataset)
-
-test_imputed <- full %>%
-  filter(dataset == "test") %>%
-  select(-dataset)
+train_imputed <- full %>% filter(dataset == "train") %>% select(-dataset)
+test_imputed  <- full %>% filter(dataset == "test")  %>% select(-dataset)
 
 
-# Insertar imputaciones en bases originales
+# Insertar imputaciones en bases sf originales
 
 
 train_final <- train_sf_clean %>%
@@ -1434,6 +1476,29 @@ test_final <- test_ready_osm_estrato %>%
     bathrooms       = test_imputed$bathrooms
   )
 
+
+# RECORTE DE EXTREMOS PARA APARTAMENTOS
+
+
+MAX_APTO_AREA <- 1500  # límite superior razonable
+
+train_final <- train_final %>%
+  mutate(
+    surface_total = ifelse(
+      property_type == "Apartamento" & surface_total > MAX_APTO_AREA,
+      MAX_APTO_AREA,
+      surface_total
+    )
+  )
+
+test_final <- test_final %>%
+  mutate(
+    surface_total = ifelse(
+      property_type == "Apartamento" & surface_total > MAX_APTO_AREA,
+      MAX_APTO_AREA,
+      surface_total
+    )
+  )
 
 ```
 
