@@ -183,6 +183,185 @@ rec <- recipe(sl, data = train_learner) %>%
              ") : (", paste(amenities, collapse = "+"), ")")
     )
   ) %>%
+<<<<<<< Updated upstream
+=======
+
+  # Eliminar columnas constantes
+  step_zv(all_predictors()) %>%
+
+  # Anti-colinealidad
+  step_corr(all_predictors(), threshold = 0.80) %>%     # quitar variables muy correlacionadas
+  step_lincomb(all_predictors())                        # quitar combinaciones lineales
+
+prep_rec <- prep(rec, training = train_learner, retain = TRUE)
+
+
+# Matrices finales
+
+
+train_mat <- bake(prep_rec, new_data = train_learner)
+test_mat  <- bake(prep_rec, new_data = test_learner)
+
+X_train <- train_mat %>% select(-price)
+y_train <- train_mat$price
+
+# Alinear columnas
+X_test <- test_mat %>% select(colnames(X_train))
+
+
+# CV
+
+
+K <- 10
+N <- nrow(train_mat)
+fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
+cv_control <- list(V = K, validRows = fold_indices)
+
+
+# Modelos base REGULARIZADOS
+
+
+# Ranger regularizado
+SL.ranger.reg <- function(...) {
+  SL.ranger(...,
+    num.trees = 300,
+    mtry = max(2, floor(ncol(X_train) * 0.15)),
+    min.node.size = 10,
+    sample.fraction = 0.7
+  )
+}
+
+# XGBoost regularizado
+SL.xgboost.reg <- function(..., nrounds = 300) {
+  SL.xgboost(...,
+    nrounds = nrounds,
+    max_depth = 3,
+    eta = 0.05,
+    subsample = 0.7,
+    colsample_bytree = 0.7,
+    min_child_weight = 5,
+    gamma = 1,
+    lambda = 2
+  )
+}
+
+mix <- c(
+  "SL.glmnet",       # en vez de SL.lm → evita rank deficiency
+  "SL.mean",
+  "SL.ranger.reg",
+  "SL.xgboost.reg"
+)
+
+# Entrenar modelo
+
+sl_fit <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS", 
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+
+# Predicciones Test
+
+
+test_prediccion <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+test_results <- test_learner %>% mutate(price = test_prediccion)
+
+
+# Guardar
+
+
+sl_xgboost_ranger_01 <- test_results %>% 
+  select(property_id, price)
+
+write.csv(
+  sl_xgboost_ranger_01,
+  here("outputs", "kaggle_submissions", "sl_xgboost_ranger_01.csv"),
+  row.names = FALSE
+)
+```
+
+
+## Versión 2 
+
+
+```{r}
+
+
+set.seed(123)
+
+
+# FILTRAR SOLO APARTAMENTOS
+ 
+
+train_apto <- train_learner %>% 
+  filter(property_type == "Apartamento")
+
+test_apto <- test_learner  # test: 94% son apartamentos
+
+
+#  Variables categóricas a factor
+
+
+factors_to_fix <- c("month", "year", "localidad", "estrato")
+
+amenities <- c(
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor", "has_gimnasio",
+  "has_piscina", "has_bbq", "has_zona_infantil", "has_balcon", "has_terraza",
+  "has_patio", "has_jardin_exterior", "has_chimenea", "has_cocina_integral",
+  "has_deposito", "has_estudio", "has_remodelado", "has_vista"
+)
+
+train_apto[amenities] <- lapply(train_apto[amenities], as.numeric)
+test_apto[amenities]  <- lapply(test_apto[amenities],  as.numeric)
+
+
+train_apto[factors_to_fix] <- lapply(train_apto[factors_to_fix], factor)
+test_apto[factors_to_fix]  <- lapply(test_apto[factors_to_fix],  factor)
+
+# Unificar niveles
+for (v in factors_to_fix) {
+  lvls <- union(levels(train_apto[[v]]), levels(test_apto[[v]]))
+  train_apto[[v]] <- factor(train_apto[[v]], levels = lvls)
+  test_apto[[v]]  <- factor(test_apto[[v]],  levels = lvls)
+}
+
+# 3. FORMULA (SIN INTERACCIONES MASIVAS)
+
+
+sl <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + 
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito + 
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+   estrato
+)
+
+
+# RECETA ESTABLE + INTERACCIÓN PANDEMIA × PARQUES
+
+
+rec <- recipe(sl, data = train_apto) %>%
+  
+  # SOLO dummificar factores reales
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  # Interacción pandemia
+  step_interact(
+    terms = ~ starts_with("year_") : dist_parques
+  ) %>%
+  
+  # Eliminar columnas constantes
+>>>>>>> Stashed changes
   step_zv(all_predictors())
 
 prep_rec <- prep(rec)
