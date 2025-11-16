@@ -1609,24 +1609,21 @@ filtrar_ciudades <- function(df, patron){
 # 5. GUARDAR TAMANO ORIGINAL
 # ================================
 n_train_original <- nrow(train_sf_clean1)
-n_test_original  <- nrow(test_ready_osm_estrato1)
 
 # ================================
 # 6. FILTRAR DIRECTAMENTE SOBRE *train_sf_clean1* Y *test_ready_osm_estrato1*
 # ================================
 train_sf_clean1 <- filtrar_ciudades(train_sf_clean1, patron_ciudades)
-test_ready_osm_estrato1 <- filtrar_ciudades(test_ready_osm_estrato1, patron_ciudades)
+
 
 # ================================
 # 7. RESUMEN DE ELIMINADOS
 # ================================
 train_eliminados <- n_train_original - nrow(train_sf_clean1)
-test_eliminados  <- n_test_original - nrow(test_ready_osm_estrato1)
+
 
 cat("**Resumen de registros eliminados**\n")
 cat("Train eliminados:", train_eliminados, "\n")
-cat("Test eliminados:",  test_eliminados, "\n")
-
 
 ```
 valores faltantes en Train
@@ -1831,11 +1828,6 @@ train_sf_clean1 %>%
   head(20)
 
 ```
-
-
-
-REVISAR QUE HACER CON LOS OUTLIERS, SI QUITARLOS ANTES DE LOS MODELOS????
-####### HASTA AQUI PUNTO DE CORTE REVISION LAURA D #####
 
 ```{r}
 library(tidyverse)
@@ -2206,72 +2198,6 @@ saveRDS(
 
 ```
 
-
-```{r}
-library(tidyverse)
-library(tidymodels)
-library(glmnet)
-
-train22 <- train_final
-test22  <- test_final
-
-# --- Log del target ---
-train22 <- train22 %>% mutate(price_log = log(price))
-
-# --- Recipe final ---
-rec_en <- recipe(price_log ~ ., data = train22) %>%
-  update_role(property_id, new_role = "ID") %>%
-  step_rm(property_id, title, description) %>%
-  step_zv(all_predictors()) %>%
-  step_nzv(all_predictors()) %>%
-  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
-  step_impute_median(all_numeric_predictors()) %>%
-  step_normalize(all_numeric_predictors())
-
-# --- Modelo final con hiperparámetros encontrados ---
-final_en <- linear_reg(
-  mode = "regression",
-  penalty = 1e-04,       # lambda óptimo
-  mixture = 0.1111111    # alpha óptimo
-) %>% 
-  set_engine("glmnet")
-
-wf_final <- workflow() %>%
-  add_recipe(rec_en) %>%
-  add_model(final_en)
-
-# --- Entrenar modelo final ---
-set.seed(123)
-fit_en <- wf_final %>% fit(data = train22)
-
-# --- Predecir en test ---
-pred_log <- predict(fit_en, test22)
-
-# Volver del log al precio ---
-pred_price <- exp(pred_log$.pred)
-
-# Redondear a entero ---
-pred_price <- round(pred_price)
-
-# --- Construir submission ---
-submission <- tibble(
-  property_id = test$property_id,
-  price = pred_price
-)
-
-# --- Guardar CSV para Kaggle ---
-timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
-
-file_name <- paste0(
-  "ElasticNet_final_lambda_1e-04_alpha_0.1111_", 
-  timestamp, ".csv"
-)
-
-write_csv(submission, file_name)
-
-cat("Archivo guardado correctamente como:\n", file_name, "\n")
-
-```
 
 
 ```{r}
