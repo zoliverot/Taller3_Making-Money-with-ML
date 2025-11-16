@@ -1,4 +1,3 @@
-
 ---
 title: "Problem Set 3 - BDML"
 author: "Cristian Muñoz - Vivian Cabanzo - Zeneth Olivero - Laura Diaz"
@@ -6,7 +5,7 @@ date: "2025-11-23"
 output: html_document
 ---
 
-# 1. DATOS. 
+# 1. DATOS.
 
 ##Librerías
 
@@ -27,15 +26,14 @@ pacman::p_load(
 pacman::p_loaded()
 ```
 
+## Cargar bases de datos principales
 
-## Cargar  bases de datos principales
 ```{r}
 #Base de datos test
 test <- read_csv("C:/Users/laura/OneDrive/Documentos/MAESTRIA EN ECONOMIA APLICADA/2025-02/BIG DATA Y MACHINE LEARNING/Taller 3/Taller3_Making-Money-with-ML/data/test.csv")
 ##Base de datos train
 train <- read_csv("C:/Users/laura/OneDrive/Documentos/MAESTRIA EN ECONOMIA APLICADA/2025-02/BIG DATA Y MACHINE LEARNING/Taller 3/Taller3_Making-Money-with-ML/data/train.csv")
 ```
-
 
 ## Limpieza de datos
 
@@ -54,7 +52,7 @@ target <- "price"
 
 ```
 
-## Exploración  y manipulación de datos del train y test
+## Exploración y manipulación de datos del train y test
 
 ```{r}
 
@@ -148,8 +146,7 @@ skimr::skim(train)
 str(train)
 ```
 
-
-## Revisamos duplicados 
+## Revisamos duplicados
 
 ```{r}
 
@@ -171,6 +168,7 @@ if (!is.na(id_col)) {
 
 getwd()
 ```
+
 #Revisón de NA
 
 ```{r}
@@ -253,6 +251,7 @@ print(grafico_faltantes)
 
 
 ```
+
 ## Revisión outliers
 
 ```{r}
@@ -317,6 +316,29 @@ ggsave(
 train %>%
   filter(surface_covered > surface_total) %>%
   select(surface_total, surface_covered)
+
+
+# Total de filas
+n_total <- nrow(train)
+
+# Filas donde el cubierto es mayor que el total (inconsistencia)
+incons <- train %>%
+  filter(surface_covered > surface_total)
+
+# Número de inconsistencias
+n_incons <- nrow(incons)
+
+# Porcentaje
+pct_incons <- round(n_incons / n_total * 100, 4)
+
+cat("Inconsistencias:", n_incons, "\n")
+cat("Porcentaje:", pct_incons, "%\n\n")
+
+# Mostrar las primeras filas
+incons %>%
+  select(surface_total, surface_covered) %>%
+  head()
+
 ```
 
 ## Variables nuevas a partir de texto
@@ -430,21 +452,11 @@ test_txt  <- add_text_dummies(test)
 
 colMeans(dplyr::select(train_txt, starts_with("has_")), na.rm = TRUE)
 colMeans(dplyr::select(test_txt,  starts_with("has_")), na.rm = TRUE)
-
-
-
-
 ```
-
-
-
 
 # Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
 
 ```{r}
-
-
-
 # Función para evaluar variables binarias vs. precio
 
 score_one_attr <- function(df, attr_col, target = "price") {
@@ -545,20 +557,13 @@ test_ready  <- add_best_vars(test_txt,  best_vars)
 
 ### Variables de Open Street Map
 
-1. Carga datos de viviendas (train y test)
-2. Usa información de OpenStreetMap para:
-   - Asociar barrio y localidad
-   - Calcular distancia a parques, colegios, restaurantes, autopistas y centros comerciales
-3. Si los datos procesados ya existen en formato .rds, los carga directamente
-(para evitar volver a correr la carga pesada del archivo OSM .pbf)
-
+1.  Carga datos de viviendas (train y test)
+2.  Usa información de OpenStreetMap para:
+    -   Asociar barrio y localidad
+    -   Calcular distancia a parques, colegios, restaurantes, autopistas y centros comerciales
+3.  Si los datos procesados ya existen en formato .rds, los carga directamente (para evitar volver a correr la carga pesada del archivo OSM .pbf)
 
 ```{r}
-
-
-
-
-
 # CONFIGURACIÓN GENERAL
 
 options(timeout = 1800)
@@ -585,7 +590,12 @@ barrios<-"outputs/barrios.rds"
 localidades<-"outputs/localidades.rds"
 pois_sf <- "outputs/pois_sf.rds"
 
+
+# Si los archivos YA existen → cargarlos
+
 if (file.exists(train_ready_osm) & file.exists(test_ready_osm) & file.exists(polys) & file.exists(lines) & file.exists(barrios) & file.exists(points) & file.exists(localidades) & file.exists(pois_sf)) {
+  
+  message("Cargando objetos .rds desde Carpeta outputs")
 
   train_ready_osm <- readRDS(train_ready_osm)
   test_ready_osm  <- readRDS(test_ready_osm)
@@ -598,10 +608,7 @@ if (file.exists(train_ready_osm) & file.exists(test_ready_osm) & file.exists(pol
 
 } else {
 
-
-
-
-
+  message("Ejecutando proceso completo...")
 
 # RUTA Y ÁREA DE INTERÉS
 
@@ -845,7 +852,6 @@ ggsave("outputs/figures/mapa_train_test_bogota.png", m , width = 8, height = 6, 
 
 ## Mapa de viviendas y puntos de interés
 
-
 ```{r}
 # Asegurar que todos los objetos estén en CRS 3116
 train_sf <- st_transform(train_sf, 3116)
@@ -948,25 +954,23 @@ ggsave("outputs/figures/mapa_train_pois_bogota.png", m_poi , width = 8, height =
 m_poi
 ```
 
-
 ##Inclusión de estrato socioeconomico
 
 A continuación se asigna el estrato socioeconómico a cada vivienda en las bases train y test a partir de los polígonos de lotes oficiales del DANE.
 
 El procedimiento realiza los siguientes pasos:
 
-- Carga de datos: se leen los archivos geoespaciales LOTE.gpkg (geometría) y estrato.csv (información tabular).
+-   Carga de datos: se leen los archivos geoespaciales LOTE.gpkg (geometría) y estrato.csv (información tabular).
 
-- Unión por código del lote: se vincula cada lote con su estrato correspondiente y se limpia la información.
+-   Unión por código del lote: se vincula cada lote con su estrato correspondiente y se limpia la información.
 
-- Conversión a objetos espaciales (sf): las bases de viviendas (train y test) se transforman a coordenadas EPSG:3116 para asegurar compatibilidad geográfica.
+-   Conversión a objetos espaciales (sf): las bases de viviendas (train y test) se transforman a coordenadas EPSG:3116 para asegurar compatibilidad geográfica.
 
-- Asignación directa: se realiza una unión espacial (st_join) para asignar el estrato cuando la vivienda cae dentro de un lote.
+-   Asignación directa: se realiza una unión espacial (st_join) para asignar el estrato cuando la vivienda cae dentro de un lote.
 
-- Imputación por proximidad: para viviendas sin estrato (NA o 0), se usa el algoritmo k-nearest neighbor (RANN::nn2), que asigna el estrato del lote más cercano, evitando alto costo computacional.
+-   Imputación por proximidad: para viviendas sin estrato (NA o 0), se usa el algoritmo k-nearest neighbor (RANN::nn2), que asigna el estrato del lote más cercano, evitando alto costo computacional.
 
-- Exportación: los resultados finales se guardan en formato .rds y .csv para uso posterior.
-
+-   Exportación: los resultados finales se guardan en formato .rds y .csv para uso posterior.
 
 ```{r}
 
@@ -1111,6 +1115,7 @@ test_sf_final  <- test_sf_join
 ```
 
 #### Correcciones
+
 La capa de parques se encontraba dañada por ende, en el siguiente bloque de codigo se repara:
 
 ```{r}
@@ -1235,17 +1240,15 @@ print(summary(train_ready_osm_estrato$dist_parques))
 
 ```
 
-
 ## Manipulación final de datos
 
 Una vez revisado problematicas de valores faltantes y outlier y correlación espacial. Se procede a corregir las bases para evitar el sobre ajuste y la falta de variables altamente significativas.
 
-### Autocrrelación espacial.
+### Autocorrelación espacial.
 
-En mapas anteriores, se puede ver que en la base de entrenamiento, cuenta con viviendas ubicadas en chapinero, o muy cercanas a esta localidad lo cual puede incurrir en que el modelo se aprenda ubicaciones más no generalice, causando error fuera de muestra. No obstante, para corregir dicho error, se estima un buffer de 1km  según los datos de la base de prueba que permita que el modelo pueda generalizar mejor 
+En mapas anteriores, se puede ver que en la base de entrenamiento, cuenta con viviendas ubicadas en chapinero, o muy cercanas a esta localidad lo cual puede incurrir en que el modelo se aprenda ubicaciones más no generalice, causando error fuera de muestra. No obstante, para corregir dicho error, se estima un buffer de 1km según los datos de la base de prueba que permita que el modelo pueda generalizar mejor
 
 ```{r}
-
 
 # Convertir a sf
 
@@ -1275,13 +1278,9 @@ train_sf_clean <- train_buffer[!idx_intersects, ]
 plot(st_geometry(train_buffer), col = "grey80")
 plot(st_geometry(buffer_chapinero), add = TRUE, border = "red", lwd = 2)
 
-
-
-
-
-
 ```
-### Manipulación valores faltantes 
+
+### Manipulación valores faltantes
 
 ```{r}
 library(tidyverse)
@@ -1290,26 +1289,157 @@ library(recipes)
 library(tidymodels)
 library(stringr)
 
-# Función: Extraer info del texto
+# ======================================================
+# Conversor palabras → números
+# ======================================================
+word_to_num <- function(x) {
+  dic <- c(
+    "uno"=1,"una"=1,"dos"=2,"tres"=3,"cuatro"=4,"cinco"=5,
+    "seis"=6,"siete"=7,"ocho"=8,"nueve"=9,"diez"=10
+  )
+  dic[x]
+}
 
+# ======================================================
+# Función general de extracción
+#  ✓ Detecta "35 baños" → 3.5 → 4
+#  ✓ Detecta "1002 banos" → 2
+#  ✓ Maneja "baño y medio" → 1.5 → 2
+#  ✓ Maneja decimales "1.5 baños" → 2
+# ======================================================
+extract_count <- function(text, num_regex, word_regex, base_words) {
+
+  txt <- tolower(text)
+
+  # =====================================================
+  # 0) DECIMALES reales tipo "1.5 baños"
+  # =====================================================
+  frac_num <- str_match(txt, "(\\d+\\.\\d)\\s*(baños|banos|baño|bano|bao|baos|wc)")
+  if (!is.na(frac_num[1])) {
+    val <- as.numeric(frac_num[2])
+    return(round(val))
+  }
+
+  # =====================================================
+  # 1) Interpretar "35 baños" como 3.5 → 4
+  # =====================================================
+  two_digit <- str_match(txt, "\\b(\\d{2})\\s*(baños|banos|baño|bano|bao|baos|wc)")
+  if (!is.na(two_digit[1])) {
+    num <- as.numeric(two_digit[2])
+    d1 <- floor(num / 10)
+    d2 <- num %% 10
+    val <- d1 + d2/10    # 35 → 3.5
+    return(round(val))   # redondear a entero
+  }
+
+  # =====================================================
+  # 2) "1002 banos" → 2
+  # =====================================================
+  big_fix <- str_match(txt, "\\b(\\d{3,4})\\s*(baños|banos|baño|bano|bao|baos|wc)")
+  if (!is.na(big_fix[1])) {
+    last <- as.numeric(substr(big_fix[2], nchar(big_fix[2]), nchar(big_fix[2])))
+    if (last %in% 1:9) return(last)
+  }
+
+  # =====================================================
+  # 3) "1 baño y medio" → 1.5 → 2
+  # =====================================================
+  half_num <- str_match(txt, "(\\d+)\\s*(baños|banos|baño|bano|bao|baos|wc)\\s*y\\s*medio")
+  if (!is.na(half_num[1])) {
+    val <- as.numeric(half_num[2]) + 0.5
+    return(round(val))
+  }
+
+  # "dos baños y medio" → 2.5 → 3
+  half_word <- str_match(txt,
+    "(uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(baños|banos|baño|bano|bao|baos|wc)\\s*y\\s*medio"
+  )
+  if (!is.na(half_word[1])) {
+    val <- word_to_num(half_word[2]) + 0.5
+    return(round(val))
+  }
+
+  # "medio baño" → 0.5 → 1
+  if (str_detect(txt, "medio\\s*(baño|banos|baños|wc)"))
+    return(1)
+
+  # =====================================================
+  # 4) Números normales ("3 baños", "2 cuartos")
+  # =====================================================
+  nums_raw <- str_extract_all(txt, num_regex)[[1]]
+  nums <- numeric(0)
+  if (length(nums_raw) > 0)
+    nums <- as.numeric(str_extract(nums_raw, "\\d+"))
+
+  # =====================================================
+  # 5) Palabras ("dos baños")
+  # =====================================================
+  words_raw <- str_match_all(txt, word_regex)[[1]]
+  nums_word <- numeric(0)
+  if (length(words_raw) > 0)
+    nums_word <- as.numeric(word_to_num(words_raw[,2]))
+
+  vals <- c(nums, nums_word)
+  vals <- vals[!is.na(vals)]
+  vals <- vals[vals >= 1 & vals <= 12]  # rango razonable
+
+  if (length(vals) > 0) return(max(vals))
+
+  # =====================================================
+  # 6) Solo aparece la palabra → asignar 1
+  # =====================================================
+  if (str_detect(txt, paste0("\\b(", paste(base_words, collapse="|"), ")\\b")))
+    return(1)
+
+  return(NA_real_)
+}
+
+# ======================================================
+# EXTRACTOR CORRECTO SOLO PARA ÁREA
+# ======================================================
+extract_area <- function(text) {
+
+  txt <- tolower(text)
+
+  # capturar: "260 m2", "260mts", "260 metros", "260  mts", "260m²"
+  matches <- str_match_all(
+    txt,
+    "(\\d{1,4})\\s*(m2|m²|metros|mts|mt)"
+  )[[1]]
+
+  if (nrow(matches) > 0) {
+    vals <- as.numeric(matches[,2])
+    vals <- vals[vals >= 10 & vals <= 1500]  # rango razonable
+    if (length(vals) > 0) return(max(vals))
+  }
+
+  return(NA_real_)
+}
+
+
+# ======================================================
+# Función principal
+# ======================================================
 extract_from_text <- function(text) {
-  
-  # Manejar NAs
+
   text <- ifelse(is.na(text), "", text)
-  txt  <- tolower(text)
-  
-  # baños
-  baños <- str_extract(txt, "(\\d+)\\s*(baños|banos|baño|bano)")
-  baños <- as.numeric(str_extract(baños, "\\d+"))
-  
-  # habitaciones
-  habs <- str_extract(txt, "(\\d+)\\s*(habitaciones|habitacion|cuartos|cuarto|alcobas|alcoba)")
-  habs <- as.numeric(str_extract(habs, "\\d+"))
-  
-  # área total
-  area <- str_extract(txt, "(\\d+)\\s*(m2|metros|m|mt|mts)")
-  area <- as.numeric(str_extract(area, "\\d+"))
-  
+
+  baños <- extract_count(
+    text,
+    num_regex  = "(\\d+)\\s*(baños|banos|baño|bano|bao|baos|wc)",
+    word_regex = "(uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(baños|banos|baño|bano|bao|baos|wc)",
+    base_words = c("baños","banos","baño","bano","bao","baos","wc")
+  )
+
+  habs <- extract_count(
+    text,
+    num_regex  = "(\\d+)\\s*(habitaciones|habitacion|cuartos|cuarto|alcobas|alcoba)",
+    word_regex = "(uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(habitaciones|habitacion|cuartos|cuarto|alcobas|alcoba)",
+    base_words = c("habitaciones","habitacion","cuartos","cuarto","alcobas","alcoba")
+  )
+
+  area <- extract_area(text)
+
   tibble(
     text_bathrooms = baños,
     text_bedrooms  = habs,
@@ -1317,57 +1447,529 @@ extract_from_text <- function(text) {
   )
 }
 
+# ======================================================
+# Extraer variables desde texto
+# ======================================================
+train_text_features <- purrr::map_dfr(train_sf_clean$description, extract_from_text)
+test_text_features  <- purrr::map_dfr(test_ready_osm_estrato$description, extract_from_text)
 
-# Extraer variables desde texto (AMBAS BASES)
-train_text_features <- extract_from_text(train_sf_clean$description)
-test_text_features  <- extract_from_text(test_ready_osm_estrato$description)
-
-# 3. Unir columnas con sf SIN ROMPER la geometría
-
-
-train_geom <- st_geometry(train_sf_clean)
-test_geom  <- st_geometry(test_ready_osm_estrato)
-
-train_sf_clean <- train_sf_clean %>%
+# ======================================================
+# Conservar geometría (sin duplicados)
+# ======================================================
+train_sf_clean1 <- train_sf_clean %>%
   st_drop_geometry() %>%
+  select(-starts_with("text_")) %>%
   bind_cols(train_text_features) %>%
-  st_set_geometry(train_geom)
+  st_set_geometry(st_geometry(train_sf_clean))
 
-test_ready_osm_estrato <- test_ready_osm_estrato %>%
+test_ready_osm_estrato1 <- test_ready_osm_estrato %>%
   st_drop_geometry() %>%
+  select(-starts_with("text_")) %>%
   bind_cols(test_text_features) %>%
-  st_set_geometry(test_geom)
+  st_set_geometry(st_geometry(test_ready_osm_estrato))
 
-
-#  Rellenar desde texto
-
+# ======================================================
+# Rellenar faltantes con lo extraído
+# ======================================================
 fill_from_text <- function(df) {
-  
-  # Si por alguna razón no existen, crearlas
-  if (!"text_bathrooms" %in% names(df)) df$text_bathrooms <- NA_real_
-  if (!"text_bedrooms"  %in% names(df)) df$text_bedrooms  <- NA_real_
-  if (!"text_surface"   %in% names(df)) df$text_surface   <- NA_real_
-  
   df %>%
     mutate(
       bathrooms = ifelse(is.na(bathrooms) & !is.na(text_bathrooms),
                          text_bathrooms, bathrooms),
-      
-      bedrooms  = ifelse(is.na(bedrooms) & !is.na(text_bedrooms),
-                         text_bedrooms, bedrooms),
-      
+      bedrooms = ifelse(is.na(bedrooms) & !is.na(text_bedrooms),
+                        text_bedrooms, bedrooms),
       surface_total = ifelse(is.na(surface_total) & !is.na(text_surface),
                              text_surface, surface_total)
     )
 }
 
-train_sf_clean <- fill_from_text(train_sf_clean)
-test_ready_osm_estrato <- fill_from_text(test_ready_osm_estrato)
+train_sf_clean1 <- fill_from_text(train_sf_clean1)
+test_ready_osm_estrato1 <- fill_from_text(test_ready_osm_estrato1)
+
+```
+
+valores faltantes en Train
+```{r}
+faltantes_train1 <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  summarise(across(everything(),
+                   list(
+                     NA_count = ~sum(is.na(.)),
+                     NA_pct   = ~mean(is.na(.))*100
+                   ),
+                   .names = "{.col}.{.fn}"
+  )) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("Variable", ".value"),
+    names_sep = "\\."
+  ) %>%
+  filter(NA_count > 0) %>%
+  arrange(desc(NA_pct))
+
+faltantes_train1
 
 
+```
+
+
+```{r}
+library(ggplot2)
+
+train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  ggplot(aes(x = bathrooms)) +
+  geom_histogram(bins = 30, fill = "#1f78b4", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribución de baños — TRAIN",
+    x = "Número de baños",
+    y = "Frecuencia"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+```{r}
+registros_banos_altos1 <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  filter(bathrooms > 10) %>%
+  select(bathrooms, bedrooms, surface_total, description)
+
+registros_banos_altos1
+
+
+```
+```{r}
+library(ggplot2)
+
+train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  ggplot(aes(x = bedrooms)) +
+  geom_histogram(bins = 30, fill = "#1f78b4", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribución de cuartos — TRAIN",
+    x = "Número de baños",
+    y = "Frecuencia"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+valores faltantes en Test
+```{r}
+faltantes_test1 <- test_ready_osm_estrato1 %>%
+  st_drop_geometry() %>%
+  summarise(across(
+    everything(),
+    list(
+      NA_count = ~sum(is.na(.)),
+      NA_pct   = ~mean(is.na(.)) * 100
+    ),
+    .names = "{.col}.{.fn}"
+  )) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Variable", ".value"),
+    names_sep = "\\."
+  ) %>%
+  filter(NA_count > 0) %>%
+  arrange(desc(NA_pct))
+
+faltantes_test1
+
+```
+
+
+```{r}
+library(ggplot2)
+
+train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  ggplot(aes(x = surface_total)) +
+  geom_histogram(bins = 30, fill = "#1f78b4", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribución de surface_total — TRAIN",
+    x = "Metros cuadrados construidos",
+    y = "Frecuencia"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+registros_total1 <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  filter(surface_total > 1000) %>%
+  select(surface_covered, surface_total, description)
+
+registros_total1
+```
+```{r}
+# Valores anómalos de surface_total en TRAIN
+train_outliers <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  filter(surface_total > 1200 | surface_total < 20) %>%
+  select(surface_total, surface_covered, price, description)
+
+train_outliers
+
+```
+```{r}
+test_outliers <- test_ready_osm_estrato1 %>%
+  st_drop_geometry() %>%
+  filter(surface_total > 1200 | surface_total < 20) %>%
+  select(surface_total, surface_covered, description)
+
+test_outliers
+
+```
+
+
+
+
+REVISAR QUE HACER CON LOS OUTLIERS, SI QUITARLOS ANTES DE LOS MODELOS????
+####### HASTA AQUI PUNTO DE CORTE REVISION LAURA D #####
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tidymodels)
+library(recipes)
+library(stringr)
+
+# =======================================================
+# 1) FIX LÓGICO surface_total ↔ surface_covered
+# =======================================================
+
+mutual_surface_fix <- function(df) {
+  df %>%
+    mutate(
+      surface_total = ifelse(
+        is.na(surface_total) & !is.na(surface_covered),
+        surface_covered, surface_total
+      ),
+      surface_covered = ifelse(
+        is.na(surface_covered) & !is.na(surface_total),
+        surface_total, surface_covered
+      )
+    )
+}
+
+train_sf_clean2 <- mutual_surface_fix(train_sf_clean1)
+test_ready_osm_estrato2 <- mutual_surface_fix(test_ready_osm_estrato1)
+
+
+# =======================================================
+# 2) Preparación de dataset TABULAR para imputar
+# =======================================================
+
+train_imp <- train_sf_clean2 %>%
+  st_drop_geometry() %>%
+  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
+
+test_imp <- test_ready_osm_estrato2 %>%
+  st_drop_geometry() %>%
+  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
+
+# Combinar para imputar de forma conjunta
+full <- bind_rows(
+  train_imp %>% mutate(dataset = "train"),
+  test_imp  %>% mutate(dataset = "test")
+)
+
+# Factor necesario para Random Forest
+full$property_type <- as.factor(full$property_type)
+
+
+# =======================================================
+# 3) Función general de imputación (Random Forest)
+# =======================================================
+
+impute_var <- function(data, target, predictors) {
+  
+  df <- data
+  
+  # Filtrar datos completos
+  complete_rows <- df %>% drop_na(all_of(c(target, predictors)))
+  missing_rows  <- df %>% filter(is.na(.data[[target]]))
+  
+  # Si no hay NA, devolver df
+  if (nrow(missing_rows) == 0) return(df)
+  
+  # Receta del modelo
+  rec <- recipe(as.formula(
+    paste(target, "~", paste(predictors, collapse = "+"))
+  ), data = complete_rows)
+  
+  # Modelo
+  mod <- rand_forest(mtry = 2, trees = 300, min_n = 5) %>%
+    set_engine("ranger") %>%
+    set_mode("regression")
+  
+  wf <- workflow() %>% add_recipe(rec) %>% add_model(mod)
+  
+  # Fit
+  fit_mod <- fit(wf, complete_rows)
+  
+  # Predicciones
+  preds <- predict(fit_mod, missing_rows) %>% pull(.pred)
+  
+  df[[target]][is.na(df[[target]])] <- preds
+  
+  df
+}
+
+
+# =======================================================
+# 4) IMPUTACIÓN EN ORDEN ÓPTIMO
+# =======================================================
+
+# Primero áreas
+full <- impute_var(full, "surface_total",
+                   predictors = c("surface_covered", "bedrooms", "bathrooms", "property_type"))
+
+full <- impute_var(full, "surface_covered",
+                   predictors = c("surface_total", "bedrooms", "bathrooms", "property_type"))
+
+# Luego habitaciones
+full <- impute_var(full, "bedrooms",
+                   predictors = c("surface_total", "surface_covered", "bathrooms", "property_type"))
+
+# Finalmente baños
+full <- impute_var(full, "bathrooms",
+                   predictors = c("surface_total", "surface_covered", "bedrooms", "property_type"))
+
+
+# =======================================================
+# 5) Separar TRAIN / TEST
+# =======================================================
+
+train_imputed <- full %>% filter(dataset == "train") %>% select(-dataset)
+test_imputed  <- full %>% filter(dataset == "test")  %>% select(-dataset)
+
+
+# =======================================================
+# 6) Insertar imputaciones en las bases sf originales
+# =======================================================
+
+train_final0 <- train_sf_clean2 %>%
+  mutate(
+    surface_total   = train_imputed$surface_total,
+    surface_covered = train_imputed$surface_covered,
+    bedrooms        = train_imputed$bedrooms,
+    bathrooms       = train_imputed$bathrooms
+  )
+
+test_final0 <- test_ready_osm_estrato2 %>%
+  mutate(
+    surface_total   = test_imputed$surface_total,
+    surface_covered = test_imputed$surface_covered,
+    bedrooms        = test_imputed$bedrooms,
+    bathrooms       = test_imputed$bathrooms
+  )
+
+
+# =======================================================
+# 7) Validación de inconsistencias (muy importante)
+# =======================================================
+
+# Cubierta no puede ser mayor que total
+inconsistencias_train <- train_final0 %>%
+  filter(surface_covered > surface_total) %>%
+  select(surface_total, surface_covered)
+
+inconsistencias_test <- test_final0 %>%
+  filter(surface_covered > surface_total) %>%
+  select(surface_total, surface_covered)
+
+cat("\nInconsistencias en TRAIN:", nrow(inconsistencias_train), "\n")
+cat("Inconsistencias en TEST:", nrow(inconsistencias_test), "\n")
+
+# Mostrar algunos casos si existen:
+head(inconsistencias_train)
+head(inconsistencias_test)
+
+# =======================================================
+# 8) REPARAR INCONSISTENCIAS DESPUÉS DE IMPUTAR
+# =======================================================
+
+fix_inconsistencias <- function(df) {
+  df %>%
+    mutate(surface_total = pmax(surface_total, surface_covered))
+}
+
+train_final0 <- fix_inconsistencias(train_final0)
+test_final0  <- fix_inconsistencias(test_final0)
+
+sum(train_final0$surface_covered > train_final0$surface_total)
+sum(test_final0$surface_covered > test_final0$surface_total)
+
+
+
+```
+
+```{r}
+# =======================================================
+# 📊 GRAFICOS DE CALIDAD DE DATOS (NO ALTERA NADA)
+# =======================================================
+
+library(ggplot2)
+library(tidyverse)
+library(sf)
+
+# =============================
+# 1) HEATMAP DE FALTANTES
+# =============================
+
+plot_missing_heatmap <- function(df, name) {
+  df_na <- df %>% 
+    st_drop_geometry() %>%
+    summarise(across(everything(), ~ mean(is.na(.)))) %>%
+    pivot_longer(cols = everything(),
+                 names_to = "variable",
+                 values_to = "pct_na") %>%
+    filter(pct_na > 0)
+
+  if (nrow(df_na) == 0) {
+    cat(paste0("✔ No hay faltantes en ", name, "\n"))
+    return(NULL)
+  }
+
+  ggplot(df_na, aes(x = reorder(variable, pct_na), y = pct_na)) +
+    geom_col(fill = "#0073C2FF") +
+    coord_flip() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = paste0("Heatmap de Faltantes — ", name),
+         x = "Variable", y = "Porcentaje NA") +
+    theme_minimal()
+}
+
+plot_missing_heatmap(train_final0, "TRAIN")
+plot_missing_heatmap(test_final0, "TEST")
+
+
+# =============================
+# 2) SCATTER surface_total vs surface_covered
+# =============================
+
+plot_surface_relation <- function(df, name){
+  ggplot(df %>% st_drop_geometry(),
+         aes(x = surface_total, y = surface_covered)) +
+    geom_point(alpha = 0.2, color = "#E57373") +
+    geom_abline(slope = 1, intercept = 0, color = "blue", lwd = 1) +
+    labs(
+      title = paste0("Relación surface_total vs surface_covered — ", name),
+      x = "surface_total",
+      y = "surface_covered"
+    ) +
+    theme_minimal()
+}
+
+plot_surface_relation(train_final0, "TRAIN")
+plot_surface_relation(test_final0, "TEST")
+
+
+# =============================
+# 3) HISTOGRAMAS DE ÁREAS
+# =============================
+
+plot_area_hist <- function(df, name){
+  df2 <- df %>% st_drop_geometry()
+
+  g1 <- ggplot(df2, aes(x = surface_total)) +
+    geom_histogram(bins = 40, fill = "#42A5F5", alpha = 0.8) +
+    labs(title = paste("Histograma surface_total —", name),
+         x = "surface_total", y = "Frecuencia") +
+    theme_minimal()
+
+  g2 <- ggplot(df2, aes(x = surface_covered)) +
+    geom_histogram(bins = 40, fill = "#66BB6A", alpha = 0.8) +
+    labs(title = paste("Histograma surface_covered —", name),
+         x = "surface_covered", y = "Frecuencia") +
+    theme_minimal()
+
+  list(g1, g2)
+}
+
+plot_area_hist(train_final0, "TRAIN")
+plot_area_hist(test_final0, "TEST")
+
+
+# =============================
+# 4) BOXPLOT de habitaciones y baños
+# =============================
+
+plot_box_discrete <- function(df, name){
+  df2 <- df %>% st_drop_geometry()
+
+  g1 <- ggplot(df2, aes(x = factor(0), y = bedrooms)) +
+    geom_boxplot(fill = "#AB47BC") +
+    labs(title = paste("Distribución de bedrooms —", name),
+         x = "", y = "bedrooms") +
+    theme_minimal()
+
+  g2 <- ggplot(df2, aes(x = factor(0), y = bathrooms)) +
+    geom_boxplot(fill = "#FFA726") +
+    labs(title = paste("Distribución de bathrooms —", name),
+         x = "", y = "bathrooms") +
+    theme_minimal()
+
+  list(g1, g2)
+}
+
+plot_box_discrete(train_final0, "TRAIN")
+plot_box_discrete(test_final0, "TEST")
+
+cat("📊 Gráficos generados correctamente.\n")
+
+```
+
+
+
+
+
+```{r}
+plot_surface_total_zoom <- function(df, name){
+  df2 <- df %>% st_drop_geometry()
+  lim <- quantile(df2$surface_total, 0.99, na.rm = TRUE)
+
+  ggplot(df2 %>% filter(surface_total <= lim),
+         aes(x = surface_total)) +
+    geom_histogram(bins = 40, fill = "#42A5F5") +
+    labs(title = paste("Histograma surface_total (zoom 99%) —", name),
+         subtitle = "Solo valores debajo del percentil 99",
+         x = "surface_total", y = "Frecuencia") +
+    theme_minimal()
+}
+
+plot_surface_total_zoom(train_final, "TRAIN")
+
+```
+```{r}
+ggplot(train_final %>% st_drop_geometry(),
+       aes(y = surface_total)) +
+  geom_boxplot(fill = "#FF7043") +
+  coord_cartesian(ylim = c(0, quantile(train_final$surface_total, 0.99, na.rm = TRUE))) +
+  labs(title = "Boxplot surface_total — TRAIN (recortado)")
+
+```
+
+```{r}
+df <- train_final %>% st_drop_geometry()
+
+lim <- quantile(df$surface_covered, 0.99, na.rm = TRUE)
+
+ggplot(df %>% filter(surface_covered <= lim),
+       aes(x = surface_covered)) +
+  geom_histogram(bins = 40, fill = "darkgreen", alpha = 0.8) +
+  labs(title = "surface_covered (zoom 99%) — TRAIN",
+       subtitle = "Sin los valores más extremos",
+       x = "surface_covered", y = "Frecuencia") +
+  theme_minimal()
+
+```
+
+############### CODIGO VIVI ORIGINAL
+```{r}
 # PASO INTERMEDIO: surface_total <-> surface_covered
-
-
 mutual_surface_fix <- function(df) {
   df %>%
     mutate(
@@ -1388,8 +1990,6 @@ test_ready_osm_estrato <- mutual_surface_fix(test_ready_osm_estrato)
 
 
 #  Preparar dataset para imputación con modelos
-
-
 train_imp <- train_sf_clean %>%
   st_drop_geometry() %>%
   select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
@@ -1501,6 +2101,8 @@ test_final <- test_final %>%
   )
 
 ```
+
+
 
 ### Revisión final de datos y eliminación de variables no necesarias
 
@@ -1632,8 +2234,6 @@ saveRDS(
 
 ```
 
-
-
 ```{r}
 # ===============================
 # 7) Distribuciones (gráficos sencillos)
@@ -1724,7 +2324,3 @@ keep_features <- setdiff(cols_common, target)  # lo común menos la y
 cat("\nFeatures a usar (comunes, sin target):\n")
 print(keep_features)
 ```
-
-
-
-
