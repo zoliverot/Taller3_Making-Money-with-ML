@@ -29,10 +29,8 @@ pacman::p_loaded()
 ## Cargar bases de datos principales
 
 ```{r}
-#Base de datos test
-test <- read_csv("C:/Users/laura/OneDrive/Documentos/MAESTRIA EN ECONOMIA APLICADA/2025-02/BIG DATA Y MACHINE LEARNING/Taller 3/Taller3_Making-Money-with-ML/data/test.csv")
-##Base de datos train
-train <- read_csv("C:/Users/laura/OneDrive/Documentos/MAESTRIA EN ECONOMIA APLICADA/2025-02/BIG DATA Y MACHINE LEARNING/Taller 3/Taller3_Making-Money-with-ML/data/train.csv")
+test <- read_csv("https://raw.githubusercontent.com/zoliverot/Taller3_Making-Money-with-ML/main/data/test.csv")
+train <- read_csv("https://raw.githubusercontent.com/zoliverot/Taller3_Making-Money-with-ML/main/data/train.csv")
 ```
 
 ## Limpieza de datos
@@ -1248,8 +1246,8 @@ Una vez revisado problematicas de valores faltantes y outlier y correlación esp
 
 En mapas anteriores, se puede ver que en la base de entrenamiento, cuenta con viviendas ubicadas en chapinero, o muy cercanas a esta localidad lo cual puede incurrir en que el modelo se aprenda ubicaciones más no generalice, causando error fuera de muestra. No obstante, para corregir dicho error, se estima un buffer de 1km según los datos de la base de prueba que permita que el modelo pueda generalizar mejor
 
-```{r}
 
+```{r}
 # Convertir a sf
 
 train_buffer <- st_as_sf(train_ready_osm_estrato, coords = c("lon", "lat"), crs = 4326)
@@ -1278,12 +1276,8 @@ train_sf_clean <- train_buffer[!idx_intersects, ]
 plot(st_geometry(train_buffer), col = "grey80")
 plot(st_geometry(buffer_chapinero), add = TRUE, border = "red", lwd = 2)
 
+
 ```
-
-
-
-
-
 
 ### Manipulación valores faltantes
 
@@ -2020,127 +2014,6 @@ sum(test_final0$surface_covered > test_final0$surface_total)
 
 
 ```
-
-```{r}
-# =======================================================
-# 📊 GRAFICOS DE CALIDAD DE DATOS (NO ALTERA NADA)
-# =======================================================
-
-library(ggplot2)
-library(tidyverse)
-library(sf)
-
-# =============================
-# 1) HEATMAP DE FALTANTES
-# =============================
-
-plot_missing_heatmap <- function(df, name) {
-  df_na <- df %>% 
-    st_drop_geometry() %>%
-    summarise(across(everything(), ~ mean(is.na(.)))) %>%
-    pivot_longer(cols = everything(),
-                 names_to = "variable",
-                 values_to = "pct_na") %>%
-    filter(pct_na > 0)
-
-  if (nrow(df_na) == 0) {
-    cat(paste0("✔ No hay faltantes en ", name, "\n"))
-    return(NULL)
-  }
-
-  ggplot(df_na, aes(x = reorder(variable, pct_na), y = pct_na)) +
-    geom_col(fill = "#0073C2FF") +
-    coord_flip() +
-    scale_y_continuous(labels = scales::percent) +
-    labs(title = paste0("Heatmap de Faltantes — ", name),
-         x = "Variable", y = "Porcentaje NA") +
-    theme_minimal()
-}
-
-plot_missing_heatmap(train_final0, "TRAIN")
-plot_missing_heatmap(test_final0, "TEST")
-
-
-# =============================
-# 2) SCATTER surface_total vs surface_covered
-# =============================
-
-plot_surface_relation <- function(df, name){
-  ggplot(df %>% st_drop_geometry(),
-         aes(x = surface_total, y = surface_covered)) +
-    geom_point(alpha = 0.2, color = "#E57373") +
-    geom_abline(slope = 1, intercept = 0, color = "blue", lwd = 1) +
-    labs(
-      title = paste0("Relación surface_total vs surface_covered — ", name),
-      x = "surface_total",
-      y = "surface_covered"
-    ) +
-    theme_minimal()
-}
-
-plot_surface_relation(train_final0, "TRAIN")
-plot_surface_relation(test_final0, "TEST")
-
-
-# =============================
-# 3) HISTOGRAMAS DE ÁREAS
-# =============================
-
-plot_area_hist <- function(df, name){
-  df2 <- df %>% st_drop_geometry()
-
-  g1 <- ggplot(df2, aes(x = surface_total)) +
-    geom_histogram(bins = 40, fill = "#42A5F5", alpha = 0.8) +
-    labs(title = paste("Histograma surface_total —", name),
-         x = "surface_total", y = "Frecuencia") +
-    theme_minimal()
-
-  g2 <- ggplot(df2, aes(x = surface_covered)) +
-    geom_histogram(bins = 40, fill = "#66BB6A", alpha = 0.8) +
-    labs(title = paste("Histograma surface_covered —", name),
-         x = "surface_covered", y = "Frecuencia") +
-    theme_minimal()
-
-  list(g1, g2)
-}
-
-plot_area_hist(train_final0, "TRAIN")
-plot_area_hist(test_final0, "TEST")
-
-
-# =============================
-# 4) BOXPLOT de habitaciones y baños
-# =============================
-
-plot_box_discrete <- function(df, name){
-  df2 <- df %>% st_drop_geometry()
-
-  g1 <- ggplot(df2, aes(x = factor(0), y = bedrooms)) +
-    geom_boxplot(fill = "#AB47BC") +
-    labs(title = paste("Distribución de bedrooms —", name),
-         x = "", y = "bedrooms") +
-    theme_minimal()
-
-  g2 <- ggplot(df2, aes(x = factor(0), y = bathrooms)) +
-    geom_boxplot(fill = "#FFA726") +
-    labs(title = paste("Distribución de bathrooms —", name),
-         x = "", y = "bathrooms") +
-    theme_minimal()
-
-  list(g1, g2)
-}
-
-plot_box_discrete(train_final0, "TRAIN")
-plot_box_discrete(test_final0, "TEST")
-
-cat("📊 Gráficos generados correctamente.\n")
-
-```
-
-
-
-
-
 ```{r}
 plot_surface_total_zoom <- function(df, name){
   df2 <- df %>% st_drop_geometry()
@@ -2187,14 +2060,6 @@ test_final <- test_final0
 ```
 
 
-```{r}
-ggplot(train_final %>% st_drop_geometry(),
-       aes(y = surface_total)) +
-  geom_boxplot(fill = "#FF7043") +
-  coord_cartesian(ylim = c(0, quantile(train_final$surface_total, 0.99, na.rm = TRUE))) +
-  labs(title = "Boxplot surface_total — TRAIN (recortado)")
-
-```
 
 ```{r}
 df <- train_final %>% st_drop_geometry()
@@ -2340,6 +2205,81 @@ saveRDS(
 
 
 ```
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+
+train22 <- train_final
+test22  <- test_final
+
+# --- Log del target ---
+train22 <- train22 %>% mutate(price_log = log(price))
+
+# --- Recipe final ---
+rec_en <- recipe(price_log ~ ., data = train22) %>%
+  update_role(property_id, new_role = "ID") %>%
+  step_rm(property_id, title, description) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+# --- Modelo final con hiperparámetros encontrados ---
+final_en <- linear_reg(
+  mode = "regression",
+  penalty = 1e-04,       # lambda óptimo
+  mixture = 0.1111111    # alpha óptimo
+) %>% 
+  set_engine("glmnet")
+
+wf_final <- workflow() %>%
+  add_recipe(rec_en) %>%
+  add_model(final_en)
+
+# --- Entrenar modelo final ---
+set.seed(123)
+fit_en <- wf_final %>% fit(data = train22)
+
+# --- Predecir en test ---
+pred_log <- predict(fit_en, test22)
+
+# Volver del log al precio ---
+pred_price <- exp(pred_log$.pred)
+
+# Redondear a entero ---
+pred_price <- round(pred_price)
+
+# --- Construir submission ---
+submission <- tibble(
+  property_id = test$property_id,
+  price = pred_price
+)
+
+# --- Guardar CSV para Kaggle ---
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
+
+file_name <- paste0(
+  "ElasticNet_final_lambda_1e-04_alpha_0.1111_", 
+  timestamp, ".csv"
+)
+
+write_csv(submission, file_name)
+
+cat("Archivo guardado correctamente como:\n", file_name, "\n")
+
+```
+
+
+```{r}
+colnames(train_final)
+```
+
+
+
 
 ```{r}
 # ===============================
