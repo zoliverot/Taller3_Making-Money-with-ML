@@ -1629,7 +1629,7 @@ test_ready_osm_estrato1 <- filtrar_ciudades(test_ready_osm_estrato1, patron_ciud
 train_eliminados <- n_train_original - nrow(train_sf_clean1)
 test_eliminados  <- n_test_original - nrow(test_ready_osm_estrato1)
 
-cat("🔍 **Resumen de registros eliminados**\n")
+cat("**Resumen de registros eliminados**\n")
 cat("Train eliminados:", train_eliminados, "\n")
 cat("Test eliminados:",  test_eliminados, "\n")
 
@@ -2181,6 +2181,10 @@ tabla_rangos_train0
 
 ```
 
+```{r}
+train_final <- train_final0
+test_final <- test_final0
+```
 
 
 ```{r}
@@ -2206,143 +2210,6 @@ ggplot(df %>% filter(surface_covered <= lim),
   theme_minimal()
 
 ```
-
-############### CODIGO VIVI ORIGINAL
-```{r}
-# PASO INTERMEDIO: surface_total <-> surface_covered
-mutual_surface_fix <- function(df) {
-  df %>%
-    mutate(
-      surface_total = ifelse(
-        is.na(surface_total) & !is.na(surface_covered),
-        surface_covered, surface_total
-      ),
-      
-      surface_covered = ifelse(
-        is.na(surface_covered) & !is.na(surface_total),
-        surface_total, surface_covered
-      )
-    )
-}
-
-train_sf_clean <- mutual_surface_fix(train_sf_clean)
-test_ready_osm_estrato <- mutual_surface_fix(test_ready_osm_estrato)
-
-
-#  Preparar dataset para imputación con modelos
-train_imp <- train_sf_clean %>%
-  st_drop_geometry() %>%
-  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
-
-test_imp <- test_ready_osm_estrato %>%
-  st_drop_geometry() %>%
-  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
-
-full <- bind_rows(
-  train_imp %>% mutate(dataset = "train"),
-  test_imp  %>% mutate(dataset = "test")
-)
-
-
-# Función de imputación con Random Forest
-
-
-impute_var <- function(data, target, predictors) {
-  
-  df <- data
-  
-  complete_rows <- df %>% drop_na(all_of(c(target, predictors)))
-  missing_rows  <- df %>% filter(is.na(.data[[target]]))
-  
-  if (nrow(missing_rows) == 0) return(df)
-  
-  rec <- recipe(as.formula(
-    paste(target, "~", paste(predictors, collapse = "+"))
-  ), data = complete_rows)
-  
-  mod <- rand_forest(mtry = 2, trees = 300, min_n = 5) %>%
-    set_engine("ranger") %>%
-    set_mode("regression")
-  
-  wf <- workflow() %>% add_recipe(rec) %>% add_model(mod)
-  
-  fit_mod <- fit(wf, complete_rows)
-  preds   <- predict(fit_mod, missing_rows) %>% pull(.pred)
-  
-  df[[target]][is.na(df[[target]])] <- preds
-  df
-}
-
-
-# IMPUTACIÓN ENCADENADA
-
-
-full <- impute_var(full, "bedrooms",
-                   predictors = c("bathrooms", "surface_total", "surface_covered", "property_type"))
-
-full <- impute_var(full, "bathrooms",
-                   predictors = c("bedrooms", "surface_total", "surface_covered", "property_type"))
-
-full <- impute_var(full, "surface_covered",
-                   predictors = c("bedrooms", "bathrooms", "surface_total", "property_type"))
-
-full <- impute_var(full, "surface_total",
-                   predictors = c("bedrooms", "bathrooms", "surface_covered", "property_type"))
-
-
-# Separar train/test imputado
-
-
-train_imputed <- full %>% filter(dataset == "train") %>% select(-dataset)
-test_imputed  <- full %>% filter(dataset == "test")  %>% select(-dataset)
-
-
-# Insertar imputaciones en bases sf originales
-
-
-train_final <- train_sf_clean %>%
-  mutate(
-    surface_total   = train_imputed$surface_total,
-    surface_covered = train_imputed$surface_covered,
-    bedrooms        = train_imputed$bedrooms,
-    bathrooms       = train_imputed$bathrooms
-  )
-
-test_final <- test_ready_osm_estrato %>%
-  mutate(
-    surface_total   = test_imputed$surface_total,
-    surface_covered = test_imputed$surface_covered,
-    bedrooms        = test_imputed$bedrooms,
-    bathrooms       = test_imputed$bathrooms
-  )
-
-
-# RECORTE DE EXTREMOS PARA APARTAMENTOS
-
-
-MAX_APTO_AREA <- 1500  # límite superior razonable
-
-train_final <- train_final %>%
-  mutate(
-    surface_total = ifelse(
-      property_type == "Apartamento" & surface_total > MAX_APTO_AREA,
-      MAX_APTO_AREA,
-      surface_total
-    )
-  )
-
-test_final <- test_final %>%
-  mutate(
-    surface_total = ifelse(
-      property_type == "Apartamento" & surface_total > MAX_APTO_AREA,
-      MAX_APTO_AREA,
-      surface_total
-    )
-  )
-
-```
-
-
 
 ### Revisión final de datos y eliminación de variables no necesarias
 
