@@ -183,8 +183,6 @@ rec <- recipe(sl, data = train_learner) %>%
              ") : (", paste(amenities, collapse = "+"), ")")
     )
   ) %>%
-<<<<<<< Updated upstream
-=======
 
   # Eliminar columnas constantes
   step_zv(all_predictors()) %>%
@@ -289,24 +287,45 @@ write.csv(
 
 
 ```{r}
-
+library(tidyverse)
+library(recipes)
+library(SuperLearner)
+library(here)
 
 set.seed(123)
 
+# ============================================================
+# 1. FILTRAR SOLO APARTAMENTOS
+# ============================================================
 
-# FILTRAR SOLO APARTAMENTOS
- 
-
-train_apto <- train_learner %>% 
+train_apto <- train_final %>% 
   filter(property_type == "Apartamento")
 
-test_apto <- test_learner  # test: 94% son apartamentos
+test_apto <- test_final   # Kaggle test → 94% apartamentos
 
-
-#  Variables categóricas a factor
-
+# ============================================================
+# 2. VARIABLES FACTOR (ROBUSTO)
+# ============================================================
 
 factors_to_fix <- c("month", "year", "localidad", "estrato")
+
+for (v in factors_to_fix) {
+  if (v %in% names(train_apto)) train_apto[[v]] <- as.factor(train_apto[[v]])
+  if (v %in% names(test_apto))  test_apto[[v]]  <- as.factor(test_apto[[v]])
+}
+
+# Alinear niveles (robusto)
+for (v in factors_to_fix) {
+  if (!(v %in% names(train_apto)) || !(v %in% names(test_apto))) next
+  
+  lvls <- union(levels(train_apto[[v]]), levels(test_apto[[v]]))
+  train_apto[[v]] <- factor(train_apto[[v]], levels = lvls)
+  test_apto[[v]]  <- factor(test_apto[[v]],  levels = lvls)
+}
+
+# ============================================================
+# 3. CONVERTIR AMENIDADES A NUMÉRICO (SOLO LAS EXISTENTES)
+# ============================================================
 
 amenities <- c(
   "has_parqueadero_garaje", "has_seguridad", "has_ascensor", "has_gimnasio",
@@ -315,22 +334,14 @@ amenities <- c(
   "has_deposito", "has_estudio", "has_remodelado", "has_vista"
 )
 
-train_apto[amenities] <- lapply(train_apto[amenities], as.numeric)
-test_apto[amenities]  <- lapply(test_apto[amenities],  as.numeric)
+common <- intersect(amenities, names(train_apto))
 
+train_apto[common] <- lapply(train_apto[common], as.numeric)
+test_apto[common]  <- lapply(test_apto[common],  as.numeric)
 
-train_apto[factors_to_fix] <- lapply(train_apto[factors_to_fix], factor)
-test_apto[factors_to_fix]  <- lapply(test_apto[factors_to_fix],  factor)
-
-# Unificar niveles
-for (v in factors_to_fix) {
-  lvls <- union(levels(train_apto[[v]]), levels(test_apto[[v]]))
-  train_apto[[v]] <- factor(train_apto[[v]], levels = lvls)
-  test_apto[[v]]  <- factor(test_apto[[v]],  levels = lvls)
-}
-
-# 3. FORMULA (SIN INTERACCIONES MASIVAS)
-
+# ============================================================
+# 4. FÓRMULA SIN INTERACCIONES
+# ============================================================
 
 sl <- as.formula(
   price ~ 
@@ -343,57 +354,52 @@ sl <- as.formula(
     has_estudio + has_remodelado + has_vista +
     dist_parques + dist_colegios + dist_restaurantes +
     dist_autopistas + dist_centros_comerciales +
-   estrato
+    localidad + estrato
 )
 
-
-# RECETA ESTABLE + INTERACCIÓN PANDEMIA × PARQUES
-
+# ============================================================
+# 5. RECETA ROBUSTA PARA TRAIN/TEST
+# ============================================================
 
 rec <- recipe(sl, data = train_apto) %>%
   
-  # SOLO dummificar factores reales
+  # Crear dummies de factores
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
   
-  # Interacción pandemia
+  # Interacción año × parques (pandemia)
   step_interact(
     terms = ~ starts_with("year_") : dist_parques
   ) %>%
   
-  # Eliminar columnas constantes
->>>>>>> Stashed changes
+  # Quitar columnas con valor único
   step_zv(all_predictors())
 
-prep_rec <- prep(rec)
+prep_rec <- prep(rec, training = train_apto, retain = TRUE)
+
+# Matrices finales
+X_train <- bake(prep_rec, new_data = train_apto) %>% select(-price)
+y_train <- train_apto$price
+X_test  <- bake(prep_rec, new_data = test_apto)
 
 # ============================================================
-# 6. Matrices finales
+# 6. SUPERLEARNER ESTABLE
 # ============================================================
 
-X_train <- bake(prep_rec, train_learner) %>% select(-price)
-y_train <- train_learner$price
+mix <- c(
+  "SL.lm",      # lineal estable
+  "SL.ranger",  # random forest estable
+  "SL.mean"     # benchmark evita explosiones
+)
 
-X_test <- bake(prep_rec, test_learner)
+# Folds robustos
+N <- nrow(train_apto)
+K <- max(2, min(5, floor(N / 30)))  # mínimo 2, máximo 5, 30 obs por fold
 
-# ============================================================
-# 7. Folds
-# ============================================================
+if (K < 2) stop("Muy pocos apartamentos para entrenar SuperLearner")
 
-K <- 5
-N <- nrow(train_learner)
+set.seed(123)
 fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
-
 cv_control <- list(V = K, validRows = fold_indices)
-
-# ============================================================
-# 8. Biblioteca
-# ============================================================
-
-mix <- c("SL.lm", "SL.ranger", "SL.xgboost", "SL.glmnet", "SL.mean")
-
-# ============================================================
-# 9. Entrenar SuperLearner
-# ============================================================
 
 sl_fit <- SuperLearner(
   Y = y_train,
@@ -405,20 +411,30 @@ sl_fit <- SuperLearner(
 )
 
 # ============================================================
-# 10. Predicción test
+# 7. PREDECIR TEST
 # ============================================================
 
-test_prediccion <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+test_pred <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
 
-test_results <- test_learner %>% mutate(price = test_prediccion)
+# valores mínimos coherentes
+test_pred <- pmax(test_pred, 1)
 
 # ============================================================
-# 11. Guardado
+# 8. ARCHIVO PARA KAGGLE
 # ============================================================
 
-write.csv(test_results, "test_superlearner_results.csv", row.names = FALSE)
-saveRDS(sl_fit, "superlearner_model.rds")
-saveRDS(test_results, "test_superlearner_results.rds")
+kaggle_output <- test_apto %>%
+  select(property_id) %>%
+  mutate(price = test_pred)
+
+write.csv(
+  kaggle_output,
+  here("outputs", "kaggle_submissions", "sl_ranger_lm_03.csv"),
+  row.names = FALSE
+)
+
+saveRDS(sl_fit, here("outputs", "kaggle_submissions", "sl_ranger_lm_03.rds"))
+saveRDS(kaggle_output, here("outputs", "kaggle_submissions", "submission_data.rds"))
 
 
 ```
