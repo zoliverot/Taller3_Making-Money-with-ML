@@ -1280,6 +1280,11 @@ plot(st_geometry(buffer_chapinero), add = TRUE, border = "red", lwd = 2)
 
 ```
 
+
+
+
+
+
 ### Manipulación valores faltantes
 
 ```{r}
@@ -1401,21 +1406,37 @@ extract_area <- function(text) {
 
   txt <- tolower(text)
 
-  # capturar: "260 m2", "260mts", "260 metros", "260  mts", "260m²"
+  # Todas las coincidencias tipo "120 m2", "80 mts", etc.
   matches <- str_match_all(
     txt,
     "(\\d{1,4})\\s*(m2|m²|metros|mts|mt)"
   )[[1]]
 
-  if (nrow(matches) > 0) {
-    vals <- as.numeric(matches[,2])
-    vals <- vals[vals >= 10 & vals <= 1500]  # rango razonable
-    if (length(vals) > 0) return(max(vals))
+  if (nrow(matches) == 0) return(NA_real_)
+
+  vals <- as.numeric(matches[,2])
+  vals <- vals[vals >= 10 & vals <= 1500]   # rango razonable
+
+  if (length(vals) == 0) return(NA_real_)
+
+  # Palabras que corresponden a áreas NO representativas
+  noise_regex <- paste0(
+    "(terraza|balcon|balcón|patio|jardin|jardín|deck|altillo|zona de ropas).*?(\\d{1,4})\\s*(m2|m²|metros|mts|mt)"
+  )
+
+  # Extraer áreas asociadas a terrazas / balcones / patios
+  noise_matches <- str_match_all(txt, noise_regex)[[1]]
+  noise_vals <- numeric(0)
+  if (nrow(noise_matches) > 0) {
+    noise_vals <- as.numeric(noise_matches[,3])
   }
 
-  return(NA_real_)
-}
+  clean_vals <- vals[!vals %in% noise_vals]
 
+  if (length(clean_vals) == 0) return(NA_real_)
+
+  return(max(clean_vals))
+} 
 
 # ======================================================
 # Función principal
@@ -1488,6 +1509,132 @@ test_ready_osm_estrato1 <- fill_from_text(test_ready_osm_estrato1)
 
 ```
 
+
+OTRAS CIUDADES QUE NO SON BOGOTÁ
+
+TRAIN
+```{r}
+otras_ciudades <- c(
+  "medellin","medellín","cali","barranquilla","cartagena","pereira","manizales",
+  "bucaramanga","cucuta","cúcuta","villavicencio","armenia","soacha","chia",
+  "zipaquira","zipaquirá","funza","mosquera","fusagasuga","tunja","neiva","rionegro","sabaneta","envigado","villa de leyva","choconta", "facatativa", "facatativá","girardot","melgar","cajica","tocancipa"
+)
+otros_lugares <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  mutate(texto = paste(title, description)) %>%
+  mutate(texto = tolower(texto)) %>%
+
+  # NO tienen la palabra Bogotá
+  filter(!str_detect(texto, "bogota|bogotá")) %>%
+
+  # PERO sí tienen otra ciudad
+  filter(str_detect(texto, paste0("\\b(", paste(otras_ciudades, collapse="|"), ")\\b"))) %>%
+
+  select(title, description)
+otros_lugares
+
+ciudades_detectadas <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  mutate(texto = paste(title, description) |> tolower()) %>%
+  filter(!str_detect(texto, "bogota|bogotá")) %>%
+  mutate(ciudad = str_extract(texto, paste0("\\b(", paste(otras_ciudades, collapse="|"), ")\\b"))) %>%
+  filter(!is.na(ciudad)) %>%
+  count(ciudad, sort = TRUE)
+ ciudades_detectadas
+```
+
+
+TEST
+```{r}
+otras_ciudades <- c(
+  "medellin","medellín","cali","barranquilla","cartagena","pereira","manizales",
+  "bucaramanga","cucuta","cúcuta","villavicencio","armenia","soacha","chia",
+  "zipaquira","zipaquirá","funza","mosquera","fusagasuga","tunja","neiva","rionegro","sabaneta","envigado","villa de leyva","choconta", "facatativa", "facatativá","girardot","melgar","cajica","tocancipa"
+)
+otros_lugares_test <- test_ready_osm_estrato1 %>%
+  st_drop_geometry() %>%
+  mutate(texto = paste(title, description)) %>%
+  mutate(texto = tolower(texto)) %>%
+
+  # NO tienen la palabra Bogotá
+  filter(!str_detect(texto, "bogota|bogotá")) %>%
+
+  # PERO sí tienen otra ciudad
+  filter(str_detect(texto, paste0("\\b(", paste(otras_ciudades, collapse="|"), ")\\b"))) %>%
+
+  select(title, description)
+otros_lugares_test
+
+ciudades_detectadas1 <- test_ready_osm_estrato1 %>%
+  st_drop_geometry() %>%
+  mutate(texto = paste(title, description) |> tolower()) %>%
+  filter(!str_detect(texto, "bogota|bogotá")) %>%
+  mutate(ciudad = str_extract(texto, paste0("\\b(", paste(otras_ciudades, collapse="|"), ")\\b"))) %>%
+  filter(!is.na(ciudad)) %>%
+  count(ciudad, sort = TRUE)
+ ciudades_detectadas1
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# ================================
+# 1. CIUDADES identificadas
+# ================================
+
+otras_ciudades <- c(
+  "medellin","medellín","cali","barranquilla","cartagena","pereira","manizales",
+  "bucaramanga","cucuta","cúcuta","villavicencio","armenia","soacha","chia",
+  "zipaquira","zipaquirá","funza","mosquera","fusagasuga","tunja","neiva","rionegro","sabaneta","envigado","villa de leyva","choconta", "facatativa", "facatativá","girardot","melgar","cajica","tocancipa"
+)
+
+# ================================
+# 2. EXCEPCIONES (avenidas de Bogotá)
+# ================================
+excepciones <- c("cali", "villavicencio")
+
+# ================================
+# 3. CIUDADES A ELIMINAR
+# ================================
+ciudades_a_eliminar <- setdiff(otras_ciudades, excepciones)
+
+patron_ciudades <- paste0("\\b(", paste(ciudades_a_eliminar, collapse = "|"), ")\\b")
+
+# ================================
+# 4. FUNCIÓN FILTRAR 
+# ================================
+filtrar_ciudades <- function(df, patron){
+  df %>%
+    mutate(texto = tolower(paste(title, description))) %>%
+    filter(!str_detect(texto, patron)) %>%  
+    select(-texto)
+}
+
+# ================================
+# 5. GUARDAR TAMANO ORIGINAL
+# ================================
+n_train_original <- nrow(train_sf_clean1)
+n_test_original  <- nrow(test_ready_osm_estrato1)
+
+# ================================
+# 6. FILTRAR DIRECTAMENTE SOBRE *train_sf_clean1* Y *test_ready_osm_estrato1*
+# ================================
+train_sf_clean1 <- filtrar_ciudades(train_sf_clean1, patron_ciudades)
+test_ready_osm_estrato1 <- filtrar_ciudades(test_ready_osm_estrato1, patron_ciudades)
+
+# ================================
+# 7. RESUMEN DE ELIMINADOS
+# ================================
+train_eliminados <- n_train_original - nrow(train_sf_clean1)
+test_eliminados  <- n_test_original - nrow(test_ready_osm_estrato1)
+
+cat("🔍 **Resumen de registros eliminados**\n")
+cat("Train eliminados:", train_eliminados, "\n")
+cat("Test eliminados:",  test_eliminados, "\n")
+
+
+```
 valores faltantes en Train
 ```{r}
 faltantes_train1 <- train_sf_clean1 %>%
@@ -1511,7 +1658,6 @@ faltantes_train1
 
 
 ```
-
 
 ```{r}
 library(ggplot2)
@@ -1578,7 +1724,6 @@ faltantes_test1
 
 ```
 
-
 ```{r}
 library(ggplot2)
 
@@ -1593,35 +1738,105 @@ train_sf_clean1 %>%
   ) +
   theme_minimal(base_size = 14)
 ```
-
 ```{r}
-registros_total1 <- train_sf_clean1 %>%
-  st_drop_geometry() %>%
-  filter(surface_total > 1000) %>%
-  select(surface_covered, surface_total, description)
-
-registros_total1
-```
-```{r}
-# Valores anómalos de surface_total en TRAIN
-train_outliers <- train_sf_clean1 %>%
-  st_drop_geometry() %>%
-  filter(surface_total > 1200 | surface_total < 20) %>%
-  select(surface_total, surface_covered, price, description)
-
-train_outliers
-
-```
-```{r}
-test_outliers <- test_ready_osm_estrato1 %>%
-  st_drop_geometry() %>%
-  filter(surface_total > 1200 | surface_total < 20) %>%
-  select(surface_total, surface_covered, description)
-
-test_outliers
+train_sf_clean1 %>%
+  summarise(
+    min = min(surface_total, na.rm = TRUE),
+    q1  = quantile(surface_total, 0.25, na.rm = TRUE),
+    mean = mean(surface_total, na.rm = TRUE),
+    median = median(surface_total, na.rm = TRUE),
+    q3  = quantile(surface_total, 0.75, na.rm = TRUE),
+    max = max(surface_total, na.rm = TRUE),
+    NAs = sum(is.na(surface_total))
+  )
 
 ```
 
+```{r}
+(train_sf_clean1 %>%
+   st_drop_geometry() %>%
+   summarise(
+     NA_count = sum(is.na(surface_total)),
+     total = n(),
+     NA_pct = (NA_count / total) * 100
+   ))
+
+```
+
+
+```{r}
+tabla_surface <- train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  mutate(
+    rango = case_when(
+      is.na(surface_total)                    ~ "NA",
+      surface_total < 30                      ~ "1. < 30 m²",
+      surface_total >= 30 & surface_total < 500   ~ "2. 30–499 m²",
+      surface_total >= 500 & surface_total < 1000 ~ "3. 500–999 m²",
+      surface_total >= 1000 & surface_total < 2000 ~ "4. 1000–1999 m²",
+      surface_total >= 2000 & surface_total < 5000 ~ "5. 2000–4999 m²",
+      surface_total >= 5000                   ~ "6. ≥ 5000 m²"
+    )
+  ) %>%
+  count(rango, sort = TRUE)
+
+tabla_surface
+
+
+```
+
+```{r}
+casos_graves <- train_sf_clean1 %>%
+  filter(surface_total >= 5000) %>%
+  select(price, surface_total, bedrooms, bathrooms, description)
+
+casos_graves
+
+```
+
+```{r}
+train_sf_clean1 <- train_sf_clean1 %>%
+  mutate(surface_total = ifelse(surface_total >= 2000 | surface_total < 30,
+                                NA,
+                                surface_total))
+
+test_ready_osm_estrato1 <- test_ready_osm_estrato1 %>%
+  mutate(surface_total = ifelse(surface_total >= 2000 | surface_total < 30,
+                                NA,
+                                surface_total))
+
+
+```
+
+```{r}
+train_sf_clean1 %>% 
+  filter(surface_total >= 2000) %>% 
+  nrow()
+
+```
+```{r}
+library(ggplot2)
+
+train_sf_clean1 %>%
+  filter(!is.na(surface_total)) %>%
+  ggplot(aes(x = surface_total)) +
+  geom_histogram(bins = 60, alpha = 0.7) +
+  labs(
+    title = "Distribución de Surface Total — TRAIN (Limpio)",
+    x = "Metros cuadrados (surface_total)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+
+```
+```{r}
+train_sf_clean1 %>%
+  st_drop_geometry() %>%
+  arrange(desc(surface_total)) %>%
+  select(surface_total, title, description) %>%
+  head(20)
+
+```
 
 
 
@@ -1940,9 +2155,34 @@ plot_surface_total_zoom <- function(df, name){
     theme_minimal()
 }
 
-plot_surface_total_zoom(train_final, "TRAIN")
+plot_surface_total_zoom(train_final0, "TRAIN")
 
 ```
+
+
+```{r}
+tabla_rangos_train0 <- train_final0 %>%
+  st_drop_geometry() %>%
+  mutate(
+    rango = case_when(
+      is.na(surface_total) ~ "NA",
+      surface_total < 30 ~ "< 30 m²",
+      surface_total >= 30 & surface_total < 500 ~ "30 – 499 m²",
+      surface_total >= 500 & surface_total < 1000 ~ "500 – 999 m²",
+      surface_total >= 1000 & surface_total < 2000 ~ "1000 – 1999 m²",
+      surface_total >= 2000 & surface_total < 5000 ~ "2000 – 4999 m²",
+      surface_total >= 5000 ~ ">= 5000 m²"
+    )
+  ) %>%
+  count(rango, sort = TRUE) %>%
+  mutate(pct = round(100 * n / sum(n), 2))
+
+tabla_rangos_train0
+
+```
+
+
+
 ```{r}
 ggplot(train_final %>% st_drop_geometry(),
        aes(y = surface_total)) +
