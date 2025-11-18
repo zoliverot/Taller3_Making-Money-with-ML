@@ -994,15 +994,46 @@ if (file.exists(train_rds_estrato) & file.exists(test_rds_estrato)) {
 
 # Cargar fuentes externas 
 
-  ruta_gpkg <- here("data", "external", "LOTE.gpkg")
-  ruta_estrato_csv <- here("data", "external", "estrato.csv")
+library(httr)
+library(readr)
+library(sf)
 
-  if (!file.exists(ruta_gpkg)) stop("No se encontró el archivo 'LOTE.gpkg' en: ", ruta_gpkg)
-  if (!file.exists(ruta_estrato_csv)) stop("No se encontró el archivo 'estrato.csv' en: ", ruta_estrato_csv)
+# ---------------------------
+# ENLACES COMPARTIDOS DE SHAREPOINT DE LOTE Y ESTRATO
+# ---------------------------
 
-  lotes_sf <- sf::st_read(ruta_gpkg, quiet = TRUE)
-  estrato_df <- readr::read_csv(ruta_estrato_csv, show_col_types = FALSE)
- 
+url_gpkg_shared <- "https://uniandes-my.sharepoint.com/:u:/r/personal/z_olivero_uniandes_edu_co/Documents/Biga%20Data%20y%20Machine%20Learning/LOTE.gpkg?csf=1&web=1&e=vT9RVd"
+
+url_estrato_shared <- "https://uniandes-my.sharepoint.com/:x:/r/personal/z_olivero_uniandes_edu_co/Documents/Biga%20Data%20y%20Machine%20Learning/estrato.csv?d=w45abd067abaf44ebbf6a1a32db452c07&csf=1&web=1&e=e9p2ce"
+
+# ---------------------------
+# FORZAR DESCARGA DIRECTA
+# ---------------------------
+url_gpkg <- paste0(url_gpkg_shared, "&download=1")
+url_estrato <- paste0(url_estrato_shared, "&download=1")
+
+# ---------------------------
+# RUTAS TEMPORALES
+# ---------------------------
+temp_gpkg <- tempfile(fileext = ".gpkg")
+temp_estrato <- tempfile(fileext = ".csv")
+
+# ---------------------------
+# DESCARGAR ARCHIVOS
+# ---------------------------
+GET(url_gpkg, write_disk(temp_gpkg, overwrite = TRUE))
+GET(url_estrato, write_disk(temp_estrato, overwrite = TRUE))
+
+# ---------------------------
+# LEER ARCHIVOS
+# ---------------------------
+lotes_sf <- st_read(temp_gpkg, quiet = TRUE)
+estrato_df <- read_csv(temp_estrato, show_col_types = FALSE)
+
+# Confirmación
+cat("Archivos cargados correctamente:\n")
+cat("- lotes_sf: ", nrow(lotes_sf), " filas\n")
+cat("- estrato_df: ", nrow(estrato_df), " filas\n")
 
 
 # Preparar y unir Lotes + Estrato
@@ -1923,20 +1954,30 @@ impute_var <- function(data, target, predictors) {
 # 4) IMPUTACIÓN EN ORDEN ÓPTIMO
 # =======================================================
 
-# Primero áreas
-full <- impute_var(full, "surface_total",
-                   predictors = c("surface_covered", "bedrooms", "bathrooms", "property_type"))
+library(recipes)
 
-full <- impute_var(full, "surface_covered",
-                   predictors = c("surface_total", "bedrooms", "bathrooms", "property_type"))
+rec <- recipe(~ ., data = full) %>%
+  
+  # Imputar áreas
+  step_impute_bag(surface_total,
+                  impute_with = imp_vars(surface_covered, bedrooms, bathrooms, property_type)) %>%
+  
+  step_impute_bag(surface_covered,
+                  impute_with = imp_vars(surface_total, bedrooms, bathrooms, property_type)) %>%
+  
+  # Imputar habitaciones
+  step_impute_bag(bedrooms,
+                  impute_with = imp_vars(surface_total, surface_covered, bathrooms, property_type)) %>%
+  
+  # Imputar baños
+  step_impute_bag(bathrooms,
+                  impute_with = imp_vars(surface_total, surface_covered, bedrooms, property_type))
 
-# Luego habitaciones
-full <- impute_var(full, "bedrooms",
-                   predictors = c("surface_total", "surface_covered", "bathrooms", "property_type"))
+# Preparar receta
+rec_prep <- prep(rec)
 
-# Finalmente baños
-full <- impute_var(full, "bathrooms",
-                   predictors = c("surface_total", "surface_covered", "bedrooms", "property_type"))
+# Aplicar imputaciones
+full <- bake(rec_prep, full)
 
 
 # =======================================================
