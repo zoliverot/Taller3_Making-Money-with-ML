@@ -11,31 +11,1158 @@ source("../origen/config.R")
 source("../origen/modeling_utils.R")
 ```
 
+# 1. LIBRERÍAS Y CONFIGURACIÓN
 
 
 ```{r}
-# ==========================================================
-# Generar y guardar archivo de predicciones para Kaggle
-# ==========================================================
 
-# Supongamos que tu mejor modelo fue Random Forest
-best_model <- model_rf
+pacman::p_load(
+  tidyverse, Matrix, caret, glmnet, lightgbm, xgboost,
+  text2vec, irlba, stopwords, Metrics, sf, here
+)
 
-# Generar predicciones de precio
-test_df$price_pred <- predict(best_model, newdata = test_df)
+# Función de limpieza de texto
+clean_text <- function(text) {
+  text %>%
+    tolower() %>%
+    stringr::str_squish()
+}
 
-# Crear dataframe con formato Kaggle
-kaggle_submission <- test_df %>%
-  select(property_id, price = price_pred)
+
 ```
+
+# 2. CARGA DE DATOS 
+
 ```{r}
-# Verificar estructura
-head(kaggle_submission)
-```
-```{r}
-# Guardar archivo CSV en la carpeta de resultados
-write_csv(kaggle_submission,
-           file.path(path_outputs, "kaggle_submissions", "submission_equipo_08_rf.csv"))
+message("Cargando los dataframes finales procesados...")
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_final  <- readRDS(here::here("data", "processed", "test_final.rds"))
+message("Datos finales cargados.")
 
-cat("Archivo de predicciones generado con éxito.\n")
+# Renombramos los dataframes para mayor claridad en este script
+train_learner <- train_final
+test_learner  <- test_final
+
 ```
+
+# 3. PREPARACIÓN DE DATOS
+
+```{r}
+message("\nPreparando datos para el modelo...")
+
+# -- Conversión de Tipos de Datos --
+binary_vars <- train_learner %>%
+  select(starts_with("has_")) %>%
+  names()
+
+train_learner <- train_learner %>% mutate(across(all_of(binary_vars), as.numeric))
+test_learner  <- test_learner  %>% mutate(across(all_of(binary_vars), as.numeric))
+
+categorical_vars <- c("month", "year", "property_type", "estrato", "localidad") # 'localidad' ES UNA FEATURE
+train_learner <- train_learner %>% mutate(across(all_of(categorical_vars), as.factor))
+test_learner  <- test_learner  %>% mutate(across(all_of(categorical_vars), as.factor))
+
+# -- Unificar Niveles de Factores --
+# Es CRUCIAL para que 'predict' no falle.
+for (v in categorical_vars) {
+  # Tomamos todos los niveles de train y test
+  all_levels <- union(levels(train_learner[[v]]), levels(test_learner[[v]]))
+  
+  # Reaplicamos los factores con el conjunto completo de niveles
+  train_learner[[v]] <- factor(train_learner[[v]], levels = all_levels)
+  test_learner[[v]]  <- factor(test_learner[[v]],  levels = all_levels)
+}
+message("Tipos de datos unificados.")
+
+```
+# 4. DEFINICIÓN DEL MODELO CON recipes
+
+```{r}
+# La fórmula ahora incluye 'localidad' como una variable predictora clave.
+model_formula <- as.formula(
+  price ~
+    surface_total + surface_covered + bedrooms + bathrooms + latitude + longitude +
+    dist_parques + dist_colegios + dist_restaurantes + dist_autopistas + dist_centros_comerciales +
+    property_type + month + year + estrato + localidad + # <--- ¡LOCALIDAD ES UNA FEATURE!
+    has_parqueadero_garaje + has_seguridad + has_ascensor + has_gimnasio + has_piscina +
+    has_bbq + has_zona_infantil + has_balcon + has_terraza +
+    has_patio + has_jardin_exterior + has_chimenea + has_cocina_integral +
+    has_deposito + has_estudio + has_remodelado + has_vista
+)
+
+# Creamos la receta de preprocesamiento
+rec <- recipe(model_formula, data = train_learner) %>%
+  # Agrupamos localidades poco frecuentes en una categoría "otros"
+  step_other(localidad, threshold = 0.01, other = "otra_localidad") %>%
+  # Convertir todas las variables categóricas a dummies
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  # Interacción entre área y estrato
+  step_interact(terms = ~ starts_with("surface_") : starts_with("estrato_")) %>%
+  # Limpieza de variables
+  step_zv(all_predictors()) %>%
+  step_corr(all_predictors(), threshold = 0.85) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# Entrenamos la receta
+message("\nPreparando la receta de preprocesamiento...")
+prep_rec <- prep(rec, training = train_learner)
+message("Receta preparada.")
+
+# Aplicamos la receta para crear las matrices finales
+X_train <- bake(prep_rec, new_data = train_learner) %>% select(-price)
+y_train <- bake(prep_rec, new_data = train_learner) %>% pull(price)
+X_test <- bake(prep_rec, new_data = test_learner) %>% select(-price)
+
+# Alinear columnas por si alguna dummy no apareció en test
+common_cols <- intersect(colnames(X_train), colnames(X_test))
+X_train <- X_train[, common_cols]
+X_test <- X_test[, common_cols]
+
+message(paste("Dimensiones de las matrices: X_train:", nrow(X_train), "x", ncol(X_train), "| X_test:", nrow(X_test), "x", ncol(X_test)))
+```
+# 5.  ENTRENAMIENTO DEL SUPERLEARNER
+
+```{r}
+# Definimos los modelos base
+SL.ranger.reg <- function(...) SL.ranger(..., num.trees = 500, mtry = floor(sqrt(ncol(X_train))), min.node.size = 10)
+SL.xgboost.reg <- function(...) SL.xgboost(..., nrounds = 500, max_depth = 4, eta = 0.05, subsample = 0.7, colsample_bytree = 0.7)
+learner_library <- c("SL.glmnet", "SL.ranger.reg", "SL.xgboost.reg")
+
+# Definimos la validación cruzada
+set.seed(1234)
+cv_control <- SuperLearner.CV.control(V = 5)
+
+# Entrenamos el SuperLearner
+message("\nEntrenando el SuperLearner sobre todo Bogotá... (esto puede tardar)")
+sl_fit <- SuperLearner(
+  Y = y_train, X = as.data.frame(X_train),
+  SL.library = learner_library, method = "method.NNLS",
+  family = gaussian(), cvControl = cv_control
+)
+message("Entrenamiento completado.")
+print(sl_fit)
+```
+
+# 6. PREDICCIÓN FINAL
+
+```{r}
+message("\nGenerando predicciones finales en el conjunto de prueba...")
+
+# Realizamos la predicción en los datos de prueba
+final_predictions <- predict(sl_fit, newdata = as.data.frame(X_test))
+precios_finales <- final_predictions$pred
+
+# Creamos el dataframe de submission
+submission <- tibble(
+  property_id = test_learner$property_id,
+  price = round(precios_finales, 0) # El '0' significa redondear a 0 decimales
+)
+
+# Guardamos el archivo
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+ruta_archivo_submission <- here::here(ruta_destino, "submission_superlearner_full.csv")
+# Convertir matriz a vector
+submission$price <- as.vector(submission$price)
+
+# Guardar sin errores
+write_csv(submission, ruta_archivo_submission)
+
+message(paste0("\nArchivo de submission guardado en:\n", ruta_archivo_submission))
+
+# (Opcional) Ver un resumen de las predicciones solo para Chapinero
+submission_chapinero <- submission %>%
+  inner_join(test_final %>% select(property_id, localidad), by = "property_id") %>%
+  filter(localidad == "Localidad Chapinero")
+
+cat("\nResumen de precios predichos para Chapinero:\n")
+summary(submission_chapinero$price)
+
+boxplot(submission_chapinero$price,
+        main = "Boxplot de precios predichos en Chapinero")
+
+
+```
+
+
+
+
+### VRESION 2 
+# 1.
+
+```{r}
+
+# -- Limpieza de Outliers en Precio (solo en Train) --
+# Esto estabiliza el entrenamiento del modelo
+q_low  <- quantile(train_final$price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_final$price, 0.99, na.rm = TRUE)
+train_learner2 <- train_final %>%
+  filter(price >= q_low & price <= q_high)
+test_learner2 <- test_final # No filtramos el test set
+
+# -- CREAR LA VARIABLE OBJETIVO CORRECTA: log(price) --
+train_learner2 <- train_learner2 %>% mutate(log_price = log1p(price))
+
+message(paste("Datos de entrenamiento reducidos a", nrow(train_learner2), "filas tras filtrar outliers."))
+```
+# 2. SELECCIÓN DE VARIABLES
+
+```{r}
+
+message("\nSeleccionando un conjunto de variables más robusto...")
+
+# Variables numéricas clave
+features_numericas <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude", "dist_parques", "dist_colegios", "dist_restaurantes"
+)
+
+# Dummies de texto más informativas (aquellas con una frecuencia entre 5% y 95%)
+# Esto elimina las que son demasiado raras o demasiado comunes
+dummy_info <- train_learner2 %>%
+  select(starts_with("has_")) %>%
+  summarise(across(everything(), mean)) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "frequency") %>%
+  filter(frequency > 0.05 & frequency < 0.95)
+
+features_dummies <- dummy_info$feature
+
+# Variables categóricas
+features_categoricas <- c("property_type", "localidad")
+
+# Conjunto final de predictores
+all_features <- c(features_numericas, features_dummies, features_categoricas)
+
+# Filtramos los dataframes para quedarnos solo con las variables que usaremos
+train_learner2 <- train_learner2 %>% select(all_of(all_features), property_id, log_price)
+test_learner2  <- test_learner2  %>% select(all_of(all_features), property_id)
+
+message(paste(length(all_features), "variables predictoras seleccionadas para el modelo."))
+```
+# 3. DEFINICIÓN DE LA RECETA DE PREPROCESAMIENTO MEJORADA
+
+```{r}
+# Unificar niveles de factores antes de la receta
+for (v in features_categoricas) {
+  lvls <- union(levels(as.factor(train_learner2[[v]])), levels(as.factor(test_learner2[[v]])))
+  train_learner2[[v]] <- factor(train_learner2[[v]], levels = lvls)
+  test_learner2[[v]]  <- factor(test_learner2[[v]],  levels = lvls)
+}
+
+# La fórmula ahora se construye dinámicamente
+model_formula <- as.formula(paste("log_price ~", paste(all_features, collapse = " + ")))
+
+# Creamos una receta de preprocesamiento más potente
+rec <- recipe(model_formula, data = train_learner2) %>%
+  # Tratar variables numéricas sesgadas aplicándoles logaritmo
+  step_log(all_of(c("surface_total", "surface_covered", "dist_parques", "dist_colegios", "dist_restaurantes")), offset = 1) %>%
+  # Agrupar localidades poco frecuentes
+  step_other(localidad, threshold = 0.02, other = "otra_localidad") %>%
+  # Manejar categorías nuevas que puedan aparecer en test
+  step_novel(all_nominal_predictors()) %>%
+  # Convertir todas las variables categóricas a dummies
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  # Eliminar variables con varianza cero
+  step_zv(all_predictors()) %>%
+  # Centrar y escalar
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# Entrenamos la receta
+message("\nPreparando la receta de preprocesamiento mejorada...")
+prep_rec <- prep(rec, training = train_learner2)
+message("Receta preparada.")
+
+# Aplicamos la receta para crear las matrices finales
+X_train <- bake(prep_rec, new_data = train_learner2) %>% select(-log_price)
+y_train <- bake(prep_rec, new_data = train_learner2) %>% pull(log_price) # <-- AHORA 'y_train' ES log_price
+X_test  <- bake(prep_rec, new_data = test_learner2)
+
+# Alinear columnas finales
+common_cols <- intersect(colnames(X_train), colnames(X_test))
+X_train <- X_train[, common_cols]
+X_test  <- X_test[, common_cols]
+
+message(paste("Dimensiones de las matrices: X_train:", nrow(X_train), "x", ncol(X_train), "| X_test:", nrow(X_test), "x", ncol(X_test)))
+```
+# 4. ENTRENAMIENTO DEL SUPERLEARNER CON PARÁMETROS AJUSTADOS
+
+```{r}
+# Modelos base con hiperparámetros ligeramente más potentes
+SL.ranger.tuned <- function(...) SL.ranger(..., num.trees = 750, mtry = floor(ncol(X_train) / 3), min.node.size = 5)
+SL.xgboost.tuned <- function(...) SL.xgboost(..., nrounds = 1000, max_depth = 5, eta = 0.03, subsample = 0.8, colsample_bytree = 0.8)
+learner_library <- c("SL.glmnet", "SL.ranger.tuned", "SL.xgboost.tuned")
+
+set.seed(1234)
+cv_control <- SuperLearner.CV.control(V = 5)
+
+message("\nEntrenando el SuperLearner... (esto puede tardar)")
+sl_fit <- SuperLearner(
+  Y = y_train, X = as.data.frame(X_train),
+  SL.library = learner_library, method = "method.NNLS",
+  family = gaussian(), cvControl = cv_control
+)
+message("Entrenamiento completado.")
+print(sl_fit)
+```
+
+#  5. PREDICCIÓN FINAL
+
+```{r}
+message("\nGenerando predicciones finales...")
+
+# Realizamos la predicción (el resultado estará en escala logarítmica)
+log_predictions <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+
+# ¡PASO CLAVE! Convertimos las predicciones a la escala de precios original
+precios_finales <- expm1(log_predictions)
+
+# Creamos el dataframe de submission
+submission <- tibble(
+  property_id = test_learner2$property_id,
+  price = round(precios_finales, 0) # El '0' significa redondear a 0 decimales
+)
+
+# Guardamos el archivo
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+ruta_archivo_submission <- here::here(ruta_destino, "submission_superlearner_improved.csv")
+# Convertir matriz a vector
+submission$price <- as.vector(submission$price)
+
+write_csv(submission, ruta_archivo_submission)
+message(paste0("\nArchivo de submission guardado en:\n", ruta_archivo_submission))
+
+# --- Verificación de las Predicciones ---
+cat("\nResumen de los precios predichos (en millones de pesos):\n")
+summary(submission$price / 1e6)
+
+# (Opcional) Ver un resumen de las predicciones solo para Chapinero
+submission_chapinero <- submission %>%
+  inner_join(test_final %>% select(property_id, localidad), by = "property_id") %>%
+  filter(localidad == "Localidad Chapinero")
+
+cat("\nResumen de precios predichos solo para Chapinero (en millones de pesos):\n")
+summary(submission_chapinero$price / 1e6)
+```
+
+
+### Resumen de las Mejoras Clave:
+
+1.  **Variable Objetivo `log_price`**: El cambio más importante. El modelo ahora aprende sobre `log(price)+1` y al final transformamos las predicciones de vuelta con `expm1()`. Esto estabiliza enormemente el modelo y es la práctica estándar para predicción de precios. Tus predicciones ahora estarán en una escala mucho más razonable.
+2.  **Filtrado de Outliers**: Se eliminan el 1% de los precios más altos y el 1% de los más bajos del conjunto de entrenamiento. Esto evita que valores extremos y posiblemente erróneos distorsionen el aprendizaje del modelo.
+3.  **Selección de Variables Inteligente**: En lugar de usar todas las variables `has_*`, el código ahora selecciona solo aquellas que tienen una presencia moderada en los datos (entre 5% y 95%). Esto reduce el ruido y ayuda al modelo a concentrarse en las características más informativas.
+4.  **Receta de Preprocesamiento Mejorada**:
+    *   `step_log()`: Se aplica una transformación logarítmica a las variables de área y distancia, que suelen estar muy sesgadas. Esto ayuda especialmente a `glmnet`.
+    *   `step_other()`: Agrupa las localidades con pocas propiedades, haciendo el modelo más robusto.
+    *   `step_novel()`: Prepara el modelo para manejar posibles nuevas categorías en los datos de prueba.
+5.  **Hiperparámetros Ajustados**: He hecho los modelos de Ranger y XGBoost un poco más "potentes" (más árboles, más profundidad) para que puedan capturar patrones más complejos.
+6.  **Verificación Final**: Al final, el resumen de las predicciones se muestra en **millones de pesos**, lo que es mucho más fácil de interpretar y te permitirá ver inmediatamente si las predicciones están en el rango que esperas (ej. 50 a 150 millones).
+
+Con estos cambios, no solo deberías ver predicciones en una escala correcta, sino que el rendimiento general del modelo (medido por RMSE o MAE) también debería mejorar significativamente.
+
+
+# 1. DATOS
+
+```{r}
+message("Cargando los dataframes finales procesados...")
+train_full <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_full  <- readRDS(here::here("data", "processed", "test_final.rds"))
+message("Datos finales cargados.")
+
+# -- CREAR LA VARIABLE OBJETIVO CORRECTA: log(price) --
+train_full <- train_full %>% mutate(log_price = log1p(price))
+
+# -- Limpieza de Outliers en Precio --
+q_low  <- quantile(train_full$log_price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_full$log_price, 0.99, na.rm = TRUE)
+train_full <- train_full %>% filter(log_price >= q_low & log_price <= q_high)
+```
+
+# 2. DIVISIÓN ESPACIAL: TREN vs. PRUEBA
+
+```{r}
+message("\nDividiendo los datos")
+
+train <- train_full
+
+# El conjunto real para submission
+test_submission <- test_full
+
+message(paste("Tamaño del set de entrenamiento:", nrow(train)))
+```
+
+# 3. DEFINICIÓN DE RECETAS
+
+```{r}
+message("\nDefiniendo recetas de preprocesamiento...")
+
+has_vars <- names(dplyr::select(train, starts_with("has_")))
+
+features <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
+  "dist_parques", "dist_colegios", "dist_restaurantes",
+  "latitude", "longitude",
+  "property_type",
+  has_vars
+)
+
+model_formula <- as.formula(paste("log_price ~", paste(features, collapse = " + ")))
+
+# -- Receta 1 --
+rec_1 <- recipe(model_formula, data = train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_interact(terms = ~ surface_total:estrato + surface_covered:estrato) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# -- Receta 2 --
+rec_2 <- recipe(model_formula, data = train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_interact(terms = ~ surface_total:estrato + surface_covered:estrato) %>%
+  step_poly(dist_parques, dist_colegios, dist_restaurantes, degree = 2) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+message("Dos recetas creadas.")
+```
+
+# 4. ESPECIFICACIÓN DEL MODELO Y TUNING GRID
+
+```{r}
+elastic_net_spec <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>% set_engine("glmnet")
+
+set.seed(123)
+tuning_grid <- grid_regular(
+  penalty(range = c(-4, 0)),
+  mixture(range = c(0, 1)),
+  levels = 5
+)
+
+set.seed(456)
+cv_folds <- vfold_cv(train, v = 5)
+
+```
+
+# 5. WORKFLOWS Y TUNING
+
+```{r}
+workflow_1 <- workflow() %>% add_recipe(rec_1) %>% add_model(elastic_net_spec)
+workflow_2 <- workflow() %>% add_recipe(rec_2) %>% add_model(elastic_net_spec)
+
+message("\nIniciando tuning para Workflow 1...")
+tune_res1 <- tune_grid(
+  workflow_1,
+  resamples = cv_folds,
+  grid = tuning_grid,
+  metrics = metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+)
+message("Tuning para Workflow 1 completado.")
+
+message("\nIniciando tuning para Workflow 2...")
+tune_res2 <- tune_grid(
+  workflow_2,
+  resamples = cv_folds,
+  grid = tuning_grid,
+  metrics = metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+)
+message("Tuning para Workflow 2 completado.")
+
+```
+
+# 6. SELECCIÓN DE MEJORES PARÁMETROS
+
+```{r}
+message("\n--- Resultados del Tuning ---")
+
+message("\n-- Workflow 1 (Base) --")
+show_best(tune_res1, metric = "rmse")
+
+message("\n-- Workflow 2 (Polinómico) --")
+show_best(tune_res2, metric = "rmse")
+
+best_params_1 <- select_best(tune_res1, metric = "rmse")
+best_params_2 <- select_best(tune_res2, metric = "rmse")
+
+print(best_params_1)
+print(best_params_2)
+
+```
+
+
+
+```{r}
+tidymodels::tidymodels_prefer()
+
+model_final_1 <- linear_reg(
+  penalty = best_params_1$penalty,
+  mixture = best_params_1$mixture
+) %>% set_engine("glmnet")
+
+model_final_2 <- linear_reg(
+  penalty = best_params_2$penalty,
+  mixture = best_params_2$mixture
+) %>% set_engine("glmnet")
+
+final_workflow_1 <- workflow() %>% add_recipe(rec_1) %>% add_model(model_final_1)
+final_workflow_2 <- workflow() %>% add_recipe(rec_2) %>% add_model(model_final_2)
+
+```
+
+# 7. ENTRENAMIENTO FINAL
+
+```{r}
+message("\n=== Entrenando Modelos Finales ===")
+
+fit_final_1 <- fit(final_workflow_1, data = train)
+fit_final_2 <- fit(final_workflow_2, data = train)
+
+message("Modelos finales entrenados correctamente.")
+
+```
+
+
+# 8. MÉTRICAS SOBRE TRAIN
+
+```{r}
+pred_train_1 <- predict(fit_final_1, train)$.pred
+pred_train_2 <- predict(fit_final_2, train)$.pred
+
+train_results <- tibble(
+  real = train$log_price,
+  pred_1 = pred_train_1,
+  pred_2 = pred_train_2
+)
+
+message("\n=== Métricas ===")
+metricas_1 <- metrics(train_results, truth = real, estimate = pred_1)
+metricas_2 <- metrics(train_results, truth = real, estimate = pred_2)
+
+print(metricas_1)
+print(metricas_2)
+
+```
+
+# 9. SELECCIÓN DEL MEJOR MODELO
+
+```{r}
+# Usamos RMSE de train para decidir
+if (metricas_1$.estimate[metricas_1$.metric == "rmse"] <
+    metricas_2$.estimate[metricas_2$.metric == "rmse"]) {
+  
+  best_fit <- fit_final_1
+  message("\nEl Workflow 1 fue el mejor.")
+  
+} else {
+  best_fit <- fit_final_2
+  message("\nEl Workflow 2 fue el mejor.")
+}
+
+```
+
+# 10. PREDICCIÓN FINAL 
+
+```{r}
+message("\nGenerando predicciones para Submission...")
+
+predictions_kaggle <- predict(best_fit, test_submission)$.pred
+price_final <- expm1(predictions_kaggle)
+
+submission <- tibble(
+  property_id = test_submission$property_id,
+  price = round(price_final)
+)
+
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+
+ruta_archivo <- here::here(ruta_destino, "submission_tidymodels_elasticnet.csv")
+write_csv(submission, ruta_archivo)
+
+message("\nArchivo guardado en:")
+message(ruta_archivo)
+
+summary(submission$price)
+
+```
+
+# =================================================================
+#        ETAPA DE MODELADO Y COMPARACIÓN CON CARET
+# =================================================================
+
+# Este script utiliza el paquete 'caret' para entrenar, tunear y comparar
+# varios modelos potentes (Random Forest, Gradient Boosting, XGBoost)
+# y seleccionar el mejor para la predicción final.
+
+# --- 1. LIBRERÍAS ---
+
+```{r}
+
+
+pacman::p_load(
+  tidyverse, here, sf, caret,
+  ranger,      # Motor rápido para Random Forest
+  gbm,         # Motor para Gradient Boosting
+  xgboost,     # Motor para XGBoost
+  Metrics      # Para calcular métricas
+)
+
+```
+
+# 2. CARGA Y PREPARACIÓN DE DATOS
+
+```{r}
+message("Cargando los dataframes finales procesados...")
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_final  <- readRDS(here::here("data", "processed", "test_final.rds"))
+
+# -- Limpieza de Outliers y creación de log_price --
+q_low  <- quantile(train_final$price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_final$price, 0.99, na.rm = TRUE)
+
+train_learner <- train_final %>%
+  filter(price >= q_low & price <= q_high) %>%
+  mutate(log_price = log1p(price))
+
+test_learner <- test_final # No modificamos el test set de Kaggle
+
+message(paste("Datos de entrenamiento listos:", nrow(train_learner), "filas"))
+```
+
+# 3. SELECCIÓN DE VARIABLES Y PREPARACIÓN FINAL
+
+```{r}
+# Columnas has_*
+has_cols <- grep("^has_", names(train_learner), value = TRUE)
+
+# Variables finales
+features <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude", "dist_parques", "dist_colegios",
+  "property_type", "localidad",
+  has_cols
+)
+
+train_data <- train_learner %>% select(all_of(features), log_price)
+test_data  <- test_learner  %>% select(all_of(features), property_id)
+
+
+train_data[has_cols] <- lapply(train_data[has_cols], \(x) as.numeric(as.character(x)))
+test_data[has_cols]  <- lapply(test_data[has_cols],  \(x) as.numeric(as.character(x)))
+
+train_data$localidad     <- factor(train_data$localidad)
+test_data$localidad      <- factor(test_data$localidad)
+
+train_data$property_type <- factor(train_data$property_type)
+test_data$property_type  <- factor(test_data$property_type)
+
+cols_factor <- names(train_data)[sapply(train_data, is.factor)]
+
+for (col in cols_factor) {
+  # Expandir niveles del train
+  train_data[[col]] <- factor(
+    train_data[[col]],
+    levels = union(levels(train_data[[col]]), levels(test_data[[col]]))
+  )
+
+  # Igualar test al train
+  test_data[[col]] <- factor(
+    test_data[[col]],
+    levels = levels(train_data[[col]])
+  )
+}
+
+```
+
+
+# 4. CONFIGURACIÓN DE LA VALIDACIÓN CRUZADA
+
+```{r}
+# Definimos el control de la validación cruzada (CV)
+# Usaremos 5 folds. 'trainControl' es el "cerebro" de caret.
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE, # Muestra el progreso del entrenamiento
+  savePredictions = "final"
+)
+```
+
+# 5. ENTRENAMIENTO Y TUNING DE MODELOS
+# 5.1 BOSQUE ALEATORIO
+
+```{r}
+message("\n--- Entrenando y tuneando Random Forest ---")
+# Grilla de hiperparámetros para tunear
+rf_grid <- expand.grid(
+  mtry = c(5, 10, 15), # Número de variables a probar en cada división
+  min.node.size = c(5, 10),
+  splitrule = "variance" # Regla de división para regresión
+)
+
+set.seed(123)
+rf_fit <- train(
+  log_price ~ .,          # Fórmula: predecir log_price usando todo lo demás
+  data = train_data,
+  method = "ranger",      # Usamos 'ranger' como motor
+  trControl = ctrl,
+  tuneGrid = rf_grid,
+  metric = "RMSE",        # Métrica a optimizar
+  importance = 'permutation' # Medir importancia de variables
+)
+message("Random Forest entrenado.")
+print(rf_fit)
+plot(varImp(rf_fit))
+```
+
+
+
+# 5.2 MÁQUINA DE AUMENTO DE GRADIENTE (GBM)
+
+```{r}
+message("\n--- Entrenando y tuneando Gradient Boosting Machine ---")
+gbm_grid <- expand.grid(
+  n.trees = c(500, 1000),
+  interaction.depth = c(3, 5),
+  shrinkage = c(0.01, 0.05),
+  n.minobsinnode = c(10)
+)
+
+set.seed(123)
+gbm_fit <- train(
+  log_price ~ .,
+  data = train_data,
+  method = "gbm",
+  trControl = ctrl,
+  tuneGrid = gbm_grid,
+  metric = "RMSE",
+  verbose = FALSE # Para que no imprima demasiado
+)
+message("GBM entrenado.")
+print(gbm_fit)
+plot(varImp(gbm_fit))
+```
+
+# 5.3 XGBOOST
+
+```{r}
+message("\n--- Entrenando y tuneando XGBoost ---")
+xgb_grid <- expand.grid(
+  nrounds = c(500, 1000),
+  max_depth = c(3, 5),
+  eta = c(0.03, 0.05),
+  gamma = 0,
+  colsample_bytree = 0.7,
+  min_child_weight = 10,
+  subsample = 0.7
+)
+
+set.seed(123)
+xgb_fit <- train(
+  log_price ~ .,
+  data = train_data,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneGrid = xgb_grid,
+  metric = "RMSE",
+  verbosity = 0
+)
+message("XGBoost entrenado.")
+print(xgb_fit)
+plot(varImp(xgb_fit))
+```
+
+# 6. COMPARACIÓN DE MODELOS Y PREDICCIÓN FINAL
+
+```{r}
+best_model <- xgb_fit  # O el que gane según tu CV
+message("\nGenerando predicciones con el mejor modelo:", best_model$method)
+
+# Hacer predicciones
+log_predictions <- predict(best_model, newdata = test_data)
+
+# Verificar que no esté vacío
+stopifnot(length(log_predictions) == nrow(test_data))
+
+precios_finales <- expm1(log_predictions)
+
+# Crear submission
+submission <- tibble(
+  property_id = test_data$property_id,
+  price = round(precios_finales)
+)
+
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+
+ruta_archivo_submission <- here::here(ruta_destino, "submission_caret_best_model.csv")
+write_csv(submission, ruta_archivo_submission)
+
+message(paste0("\nArchivo guardado en:\n", ruta_archivo_submission))
+summary(submission$price / 1e6)
+
+```
+
+### Cambios Clave y Explicación de la Lógica:
+
+1.  **Enfoque `caret`:** Todo el script está ahora centrado en el flujo de trabajo de `caret`: `trainControl()` -> `expand.grid()` -> `train()`.
+2.  **Problema de Regresión:** He adaptado toda la lógica para un problema de **regresión** (predecir `log_price`) en lugar de clasificación.
+    *   La métrica a optimizar es `RMSE` (no `ROC`).
+    *   La regla de división en Random Forest es `"variance"` (no `"gini"`).
+3.  **Preparación de Datos Simplificada:** `caret` tiene una gran ventaja: puede manejar las variables categóricas (como `localidad` y `property_type`) **internamente**. No necesitas usar `recipes` para crear las dummies manualmente. Simplemente le pasamos la fórmula `log_price ~ .` y `caret` se encarga de todo. Esto simplifica mucho el preprocesamiento.
+4.  **Tuning de Hiperparámetros:**
+    *   Para cada modelo (Random Forest, GBM, XGBoost), se define un `expand.grid()`. Esta es una tabla con diferentes combinaciones de hiperparámetros que quieres probar.
+    *   La función `train()` automáticamente ejecuta la validación cruzada para **probar cada combinación de la grilla** y encontrar la que produce el menor `RMSE`.
+5.  **Comparación de Modelos:**
+    *   `resamples()` recopila los resultados de la validación cruzada de todos tus modelos entrenados.
+    *   `summary(model_results)` te muestra una tabla comparativa del RMSE promedio (y otras métricas) para cada modelo. `bwplot()` te lo muestra gráficamente. Esto te permite decidir objetivamente cuál es el mejor modelo.
+6.  **Predicción Final:** Después de comparar, el código selecciona el `best_model` (en el ejemplo, asumo que es `xgb_fit`, pero puedes cambiarlo fácilmente) y lo usa para generar el archivo de submission final.
+
+
+####### Regresión lineal #######
+# 1. CARGA Y PREPARACIÓN DE DATOS 
+
+```{r}
+message("Cargando los dataframes finales procesados...")
+train_full <- readRDS(here::here("data", "processed", "train_final.rds"))
+
+# -- Limpieza de Outliers y preparación del dataframe --
+q_low  <- quantile(train_full$price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_full$price, 0.99, na.rm = TRUE)
+vivienda_bogota <- train_full %>%
+  filter(price >= q_low & price <= q_high) %>%
+  # Creamos una variable de precio en millones para que los números sean más manejables
+  mutate(preciom = price / 1e6) %>%
+  # Renombramos 'surface_total' para que coincida con tu ejemplo
+  rename(areaconst = surface_total) %>%
+  # Filtramos NAs en las variables que vamos a usar
+  filter(!is.na(preciom), !is.na(areaconst))
+
+message(paste("Datos listos con", nrow(vivienda_bogota), "observaciones."))
+
+
+# -- PREPARACIÓN DEL TEST SET --
+# Es crucial aplicar las mismas transformaciones.
+# Imputamos NAs en 'areaconst' del test set con la mediana del train set.
+median_area_train <- median(train_learner$areaconst, na.rm = TRUE)
+
+test_learner <- test_full %>%
+  mutate(preciom = NA) %>% # No tenemos el precio aquí
+  rename(areaconst = surface_total) %>%
+  mutate(areaconst = ifelse(is.na(areaconst), median_area_train, areaconst))
+
+message(paste("Datos de entrenamiento listos con", nrow(train_learner), "observaciones."))
+message(paste("Datos de prueba listos con", nrow(test_learner), "observaciones."))
+```
+
+# 2.  AJUSTE Y ANÁLISIS DE DIFERENTES MODELOS LINEALES
+
+```{r}
+message("\n--- Modelo 1: price ~ area ---")
+modelo1 <- lm(preciom ~ areaconst, data = vivienda_bogota)
+
+# Resumen del modelo
+print(summary(modelo1))
+
+# Intervalos de confianza para los coeficientes
+cat("\nIntervalos de Confianza para los Coeficientes (Modelo 1):\n")
+print(confint(modelo1))
+```
+
+```{r}
+message("\n--- Modelo 2: log(price) ~ log(area) ---")
+# Añadimos 1 para evitar log(0) si hubiera áreas de 0
+modelo2 <- lm(log(preciom) ~ log(areaconst + 1), data = vivienda_bogota)
+print(summary(modelo2))
+```
+
+```{r}
+message("\n--- Modelo 3: log(price) ~ area ---")
+modelo3 <- lm(log(preciom) ~ areaconst, data = vivienda_bogota)
+print(summary(modelo3))
+```
+
+
+```{r}
+message("\n--- Modelo 4: price ~ log(area) ---")
+modelo4 <- lm(preciom ~ log(areaconst + 1), data = vivienda_bogota)
+print(summary(modelo4))
+```
+
+
+# 3. COMPARACIÓN DE MODELOS Y SELECCIÓN DEL MEJOR
+
+```{r}
+# -- COMPARACIÓN CON AIC --
+# El Criterio de Información de Akaike (AIC) nos ayuda a comparar modelos.
+# El modelo con el AIC más bajo es el preferido.
+aic_results <- AIC(modelo1, modelo2, modelo3, modelo4)
+cat("\n--- Comparación de Modelos por AIC (menor es mejor) ---\n")
+print(aic_results)
+
+# Seleccionamos el mejor modelo (el que tiene el menor AIC)
+best_model_name <- rownames(aic_results)[which.min(aic_results$AIC)]
+cat("\nEl mejor modelo simple es:", best_model_name, "\n")
+best_simple_model <- get(best_model_name)
+```
+
+# 4. PREDICCIÓN CON EL MEJOR MODELO SIMPLE
+
+```{r}
+message("\nGenerando predicciones con el mejor modelo simple...")
+
+# Verificamos si el mejor modelo predice el logaritmo del precio
+predicts_log <- str_detect(as.character(formula(best_simple_model)), "log") |> any()
+predicts_log <- isTRUE(predicts_log)   # Garantiza longitud 1
+
+# Hacemos la predicción en el set de prueba
+predictions_simple_raw <- predict(best_simple_model, newdata = test_learner)
+
+# Convertimos las predicciones a la escala original de precios
+if (predicts_log) {
+  # Si el modelo predijo log(preciom), revertimos la transformación
+  precios_finales_simple <- exp(predictions_simple_raw) * 1e6
+} else {
+  # Si el modelo predijo preciom, solo multiplicamos por 1 millón
+  precios_finales_simple <- predictions_simple_raw * 1e6
+}
+
+# Creamos el dataframe de submission
+submission_simple <- tibble(
+  property_id = test_learner$property_id,
+  price = precios_finales_simple
+)
+
+# Guardamos el archivo
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+ruta_archivo_submission <- here::here(ruta_destino, "submission_simple_linear.csv")
+write_csv(submission_simple, ruta_archivo_submission)
+
+message(paste0("\nArchivo de submission del modelo simple guardado en:\n", ruta_archivo_submission))
+cat("\nResumen de precios predichos (Modelo Simple):\n")
+summary(submission_simple$price)
+
+```
+
+# 5. MODELO DE REGRESIÓN MÚLTIPLE
+
+```{r}
+# Un modelo con una sola variable es una buena base, pero para una mejor
+# predicción, debemos usar más información.
+
+message("\n\n--- Entrenando un Modelo de Regresión Lineal Múltiple más potente... ---")
+
+# Seleccionamos un conjunto más rico de variables
+features_multiples <- c(
+  "surface_total", "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude", "property_type", "localidad"
+)
+
+# Creamos la fórmula SIN transformación en la variable respuesta
+model_formula_multi <- as.formula(
+  paste("price ~", paste(features_multiples, collapse = " + "))
+)
+
+# Creamos la receta, aplicando log(price) correctamente
+rec_multi <- recipe(model_formula_multi, data = train_full) %>%
+  step_log(price, skip = TRUE) %>%                               # ⬅️ Transformación permitida
+  step_other(localidad, threshold = 0.01) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+
+# Especificamos el modelo, lo unimos al workflow y lo entrenamos
+lm_spec <- linear_reg() %>% set_engine("lm")
+lm_workflow <- workflow() %>% add_recipe(rec_multi) %>% add_model(lm_spec)
+final_lm_fit <- fit(lm_workflow, data = train_full)
+
+# --- Predicción con el Modelo Múltiple ---
+message("Generando predicciones con el modelo múltiple...")
+
+log_predictions_multi <- predict(final_lm_fit, new_data = test_full)
+
+# Convertimos de logaritmo a precio original
+precios_finales_multi <- exp(log_predictions_multi$.pred)
+
+# Creamos el dataframe de submission
+submission_multiple <- tibble(
+  property_id = test_full$property_id,
+  price = precios_finales_multi
+)
+
+# Guardamos el archivo
+ruta_archivo_submission_multi <- here::here(ruta_destino, "submission_multiple_linear.csv")
+write_csv(submission_multiple, ruta_archivo_submission_multi)
+message(paste0("\nArchivo de submission del modelo múltiple guardado en:\n", ruta_archivo_submission_multi))
+
+cat("\nResumen de precios predichos (Modelo Múltiple):\n")
+summary(submission_multiple$price)
+
+```
+
+
+```{r}
+message("\nDefiniendo una receta de preprocesamiento avanzada...")
+
+# -------------------------------
+# 1) VARIABLES
+# -------------------------------
+
+features <- c(
+  "surface_total", "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude", "property_type", "localidad",
+  "has_parqueadero_garaje", "has_ascensor", "has_terraza"
+)
+
+vars_necesarias_test <- c(features, "property_id", "surface_covered","dist_autopistas","dist_centros_comerciales", "dist_parques")
+
+# Reconstruimos test_learner GARANTIZANDO todas las columnas
+test_learner <- test_final[, vars_necesarias_test, drop = FALSE]
+
+# -------------------------------
+# 2) ASEGURAR QUE TRAIN Y TEST TIENEN MISMO NIVELES FACTOR
+# -------------------------------
+
+
+categorical_features <- c("property_type", "localidad", "estrato")
+
+for (v in categorical_features) {
+  lvls <- union(levels(as.factor(train_learner[[v]])),
+                levels(as.factor(test_learner[[v]])))
+  train_learner[[v]] <- factor(train_learner[[v]], levels = lvls)
+  test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
+}
+
+
+# -------------------------------
+# 3) CREAR FORMULA CORRECTA (sin log)
+# -------------------------------
+
+model_formula <- as.formula(
+  paste("price ~", paste(features, collapse = " + "))
+)
+
+# -------------------------------
+# 4) RECIPE AVANZADA
+# -------------------------------
+
+rec_avanzada <- recipe(model_formula, data = train_learner) %>%
+  
+  # Transformación de la variable objetivo (solo en training)
+  step_log(price, skip = TRUE) %>%
+  
+  # Transformación log predictores sesgados
+  step_log(surface_total, offset = 1) %>%
+  
+  # Winsorizing ESTABLE (basado en percentiles del training)
+  step_mutate_at(
+    surface_total,
+    fn = function(x) {
+      p <- quantile(x, 0.98, na.rm = TRUE)
+      pmin(x, p)
+    }
+  ) %>%
+  
+  # Categóricas
+  step_other(localidad, threshold = 0.02, other = "otra_localidad") %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  # Interacciones
+  step_interact(terms = ~ starts_with("surface_total") : starts_with("estrato_")) %>%
+  step_interact(terms = ~ starts_with("surface_total") : starts_with("localidad_")) %>%
+  
+  # Limpieza final
+  step_zv(all_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# No se usa prep(): workflows lo hacen automáticamente
+# prep_rec <- prep(rec_avanzada, training = train_learner)  # ← SE ELIMINA
+
+# -------------------------------
+# 5) WORKFLOW + MODELO
+# -------------------------------
+
+lm_spec <- linear_reg() %>% set_engine("lm")
+
+lm_workflow <- workflow() %>%
+  add_recipe(rec_avanzada) %>% 
+  add_model(lm_spec)
+
+# -------------------------------
+# 6) ENTRENAMIENTO
+# -------------------------------
+
+message("\nEntrenando el modelo lineal potenciado...")
+final_fit <- fit(lm_workflow, data = train_learner)
+message("Modelo entrenado.")
+
+# -------------------------------
+# 7) PREDICCIÓN FINAL
+# -------------------------------
+
+message("Generando predicciones en el set de prueba...")
+
+log_predictions <- predict(final_fit, new_data = test_learner)
+
+# Convertimos de log a la escala original
+precios_finales <- exp(log_predictions$.pred)
+
+# -------------------------------
+# 8) CREAR SUBMISSION
+# -------------------------------
+
+submission <- tibble(
+  property_id = test_learner$property_id,
+  price = precios_finales
+)
+
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+
+ruta_archivo_submission <- here::here(ruta_destino, "submission_lm_potenciado.csv")
+write_csv(submission, ruta_archivo_submission)
+
+message(paste0("\nArchivo de submission guardado en:\n", ruta_archivo_submission))
+
+cat("\n--- Resumen de Precios Predichos (Modelo Potenciado) ---\n")
+summary(submission$price)
+
+cat("\n--- Resumen en Millones de Pesos ---\n")
+summary(submission$price / 1e6)
+
+# -------------------------------
+# 9) Histograma
+# -------------------------------
+ggplot(submission, aes(x = price / 1e6)) +
+  geom_histogram(bins = 50, fill = "deepskyblue3", alpha = 0.7) +
+  geom_vline(xintercept = 200, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Distribución de Precios Predichos",
+    subtitle = "La línea roja marca los 200 millones",
+    x = "Precio Predicho (en Millones de Pesos)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+
+
