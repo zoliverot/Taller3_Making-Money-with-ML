@@ -348,7 +348,7 @@ summary(submission_chapinero$price / 1e6)
 ```
 
 
-### Resumen de las Mejoras Clave:
+### Resumen:
 
 1.  **Variable Objetivo `log_price`**: El cambio más importante. El modelo ahora aprende sobre `log(price)+1` y al final transformamos las predicciones de vuelta con `expm1()`. Esto estabiliza enormemente el modelo y es la práctica estándar para predicción de precios. Tus predicciones ahora estarán en una escala mucho más razonable.
 2.  **Filtrado de Outliers**: Se eliminan el 1% de los precios más altos y el 1% de los más bajos del conjunto de entrenamiento. Esto evita que valores extremos y posiblemente erróneos distorsionen el aprendizaje del modelo.
@@ -360,7 +360,6 @@ summary(submission_chapinero$price / 1e6)
 5.  **Hiperparámetros Ajustados**: He hecho los modelos de Ranger y XGBoost un poco más "potentes" (más árboles, más profundidad) para que puedan capturar patrones más complejos.
 6.  **Verificación Final**: Al final, el resumen de las predicciones se muestra en **millones de pesos**, lo que es mucho más fácil de interpretar y te permitirá ver inmediatamente si las predicciones están en el rango que esperas (ej. 50 a 150 millones).
 
-Con estos cambios, no solo deberías ver predicciones en una escala correcta, sino que el rendimiento general del modelo (medido por RMSE o MAE) también debería mejorar significativamente.
 
 
 # 1. DATOS
@@ -598,7 +597,6 @@ summary(submission$price)
 #        ETAPA DE MODELADO Y COMPARACIÓN CON CARET
 # =================================================================
 
-# Este script utiliza el paquete 'caret' para entrenar, tunear y comparar
 # varios modelos potentes (Random Forest, Gradient Boosting, XGBoost)
 # y seleccionar el mejor para la predicción final.
 
@@ -811,7 +809,7 @@ summary(submission$price / 1e6)
 
 ```
 
-### Cambios Clave y Explicación de la Lógica:
+### Resumen:
 
 1.  **Enfoque `caret`:** Todo el script está ahora centrado en el flujo de trabajo de `caret`: `trainControl()` -> `expand.grid()` -> `train()`.
 2.  **Problema de Regresión:** He adaptado toda la lógica para un problema de **regresión** (predecir `log_price`) en lugar de clasificación.
@@ -1043,7 +1041,7 @@ for (v in categorical_features) {
 
 
 # -------------------------------
-# 3) CREAR FORMULA CORRECTA (sin log)
+# 3) CREAR FORMULA CORRECTA
 # -------------------------------
 
 model_formula <- as.formula(
