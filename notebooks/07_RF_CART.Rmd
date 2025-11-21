@@ -1,0 +1,242 @@
+---
+###**Propósito:** Entrenamiento Random Forest y CART
+---
+title: "07 - RF y CART"
+output: html_document
+---
+
+```{r}
+source("../origen/config.R")
+source("../origen/data_utils.R")
+```
+
+##Librerías
+
+```{r}
+# Instalar y cargar
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes
+)
+# Verificar paquetes cargados
+pacman::p_loaded()
+```
+
+```{r}
+
+#Bases de datos 
+test <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/test_final.rds"))
+
+train <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/train_final.rds"))
+
+```
+
+
+```{r}
+
+# ==== PREP LISTO PARA ENTRENAR (RF / CART) ====
+
+target  <- if ("price" %in% names(train)) "price" else stop("No encuentro 'price' en train.")
+id_col  <- if ("property_id" %in% names(train)) "property_id" else NULL
+
+# 1) Forzar factores planificados
+fac_cols <- intersect(c("month","year","localidad","estrato"), names(train))
+train <- train %>% mutate(across(all_of(fac_cols), ~as.factor(.)))
+test  <- test  %>% mutate(across(all_of(fac_cols), ~as.factor(.)))
+
+# 2) Alinear niveles de factores entre train y test (unión de niveles)
+align_levels <- function(tr, te, cols){
+  for (c in cols) {
+    lvls <- union(levels(tr[[c]]), levels(te[[c]]))
+    tr[[c]] <- factor(tr[[c]], levels = lvls)
+    te[[c]] <- factor(te[[c]], levels = lvls)
+  }
+  list(train=tr, test=te)
+}
+tmp <- align_levels(train, test, fac_cols)
+train <- tmp$train; test <- tmp$test
+
+# 3) Re-codificar dummies has_* a 0/1 (seguro)
+binary_vars <- intersect(c(
+  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
+  "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
+  "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito",
+  "has_estudio","has_remodelado","has_vista"
+), names(train))
+
+to01 <- function(x){
+  # pasa factor/char/lógico/num a 0/1 de forma robusta
+  if (is.factor(x)) x <- as.character(x)
+  if (is.character(x)) {
+    x <- tolower(trimws(x))
+    return(as.integer(x %in% c("1","si","sí","true","t","y","yes","s","present","presente")))
+  }
+  if (is.logical(x)) return(as.integer(x))
+  if (is.numeric(x)) return(as.integer(ifelse(is.na(x), NA, x != 0)))
+  return(as.integer(!is.na(x) & x != 0))
+}
+
+train <- train %>% mutate(across(all_of(binary_vars), to01))
+test  <- test  %>% mutate(across(all_of(binary_vars),  to01))
+
+# Reemplazar NA en dummies por 0 (ausencia)
+train <- train %>% mutate(across(all_of(binary_vars), ~replace_na(., 0L)))
+test  <- test  %>% mutate(across(all_of(binary_vars),  ~replace_na(., 0L)))
+
+# 4) Remover columnas indeseadas si existen
+vars_remove <- intersect(c("has_pisos_vivienda","has_salon_social"), names(train))
+train <- train %>% select(-all_of(vars_remove))
+test  <- test  %>% select(-all_of(vars_remove))
+
+# 5) Remover texto crudo si aún existe
+txt_to_rm <- intersect(c("title","description"), names(train))
+train <- train %>% select(-all_of(txt_to_rm))
+test  <- test  %>% select(-all_of(txt_to_rm))
+
+# 6) Eliminar columnas de varianza cero (usando recipe para detectar y aplicar)
+rec_zv <- recipe(as.formula(paste(target, "~ .")), data = train) %>%
+  update_role(any_of(id_col), new_role = "id") %>%
+  step_zv(all_predictors())
+
+rec_zv_prep <- prep(rec_zv, training = train, verbose = FALSE)
+train_nzv   <- bake(rec_zv_prep, new_data = NULL)
+test_nzv    <- bake(rec_zv_prep, new_data = test)
+
+# 7) Imputación ligera de NAs residuales (si quedaran)
+rec_imp <- recipe(as.formula(paste(target, "~ .")), data = train_nzv) %>%
+  update_role(any_of(id_col), new_role = "id") %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors())
+
+rec_imp_prep <- prep(rec_imp, training = train_nzv, verbose = FALSE)
+train_ready  <- bake(rec_imp_prep, new_data = NULL)
+test_ready   <- bake(rec_imp_prep, new_data = test_nzv)
+
+# Resultado final
+train_prepared <- train_ready
+test_prepared  <- test_ready
+
+
+```
+
+## CART
+
+```{r}
+
+set.seed(2025)
+
+stopifnot(exists("train_ready"), exists("test_ready"))
+
+tgt    <- if ("price" %in% names(train_ready)) "price" else stop("No encuentro 'price' en train_ready.")
+id_col <- intersect(c("property_id","id"), names(train_ready))
+id_col <- if (length(id_col)) id_col[[1]] else NULL
+
+train <- train_ready
+test  <- test_ready
+
+# 1) Guardar ID para submission y asegurar que NO sea factor en test/train
+id_test <- if (!is.null(id_col) && id_col %in% names(test)) as.character(test[[id_col]]) else seq_len(nrow(test))
+if (!is.null(id_col)) {
+  train[[id_col]] <- as.character(train[[id_col]])
+  test [[id_col]] <- as.character(test [[id_col]])
+}
+
+# 2) Quitar texto crudo si quedó
+drop_txt <- intersect(c("title","description"), names(train))
+train <- dplyr::select(train, -all_of(drop_txt))
+test  <- dplyr::select(test,  -all_of(drop_txt))
+
+# 3) Quitar el ID de los predictores (clave para evitar el error)
+if (!is.null(id_col)) {
+  train_model <- dplyr::select(train, -all_of(id_col))
+  test_model  <- dplyr::select(test,  -all_of(id_col))
+} else {
+  train_model <- train
+  test_model  <- test
+}
+
+# 4) Alinear niveles de TODAS las categóricas entre train/test
+is_cat <- function(x) is.factor(x) || is.character(x)
+fac_cols <- names(Filter(is_cat, train_model[, setdiff(names(train_model), tgt), drop = FALSE]))
+for (c in fac_cols) {
+  trf <- if (is.factor(train_model[[c]])) train_model[[c]] else factor(as.character(train_model[[c]]))
+  tef <- if (is.factor(test_model [[c]])) test_model [[c]] else factor(as.character(test_model [[c]]))
+  lvls <- union(levels(trf), levels(tef))
+  train_model[[c]] <- forcats::fct_explicit_na(factor(trf, levels = lvls), na_level = "unknown")
+  test_model [[c]] <- forcats::fct_explicit_na(factor(tef, levels = lvls), na_level = "unknown")
+}
+
+# 5) Imputar NAs numéricos por mediana de TRAIN (rápido y seguro para CART)
+num_cols <- setdiff(names(Filter(is.numeric, train_model)), tgt)
+for (c in num_cols) {
+  med <- suppressWarnings(stats::median(train_model[[c]], na.rm = TRUE))
+  if (is.finite(med)) {
+    if (anyNA(train_model[[c]])) train_model[[c]][is.na(train_model[[c]])] <- med
+    if (c %in% names(test_model) && anyNA(test_model[[c]])) test_model[[c]][is.na(test_model[[c]])] <- med
+  }
+}
+
+# 6) Remover columnas sin varianza (evita splits inútiles)
+zv <- names(which(sapply(train_model[, setdiff(names(train_model), tgt), drop = FALSE],
+                         function(v) dplyr::n_distinct(v, na.rm = TRUE) <= 1)))
+if (length(zv) > 0) {
+  train_model <- dplyr::select(train_model, -all_of(zv))
+  test_model  <- dplyr::select(test_model,  -all_of(zv))
+}
+
+# 7) Entrenar CART con poda 1-SE
+form <- as.formula(paste(tgt, "~ ."))
+ctrl <- rpart.control(cp = 0.001, minsplit = 20, maxdepth = 12, xval = 10)
+cart_raw <- rpart(formula = form, data = train_model, method = "anova", control = ctrl)
+
+cpt      <- cart_raw$cptable
+i_min    <- which.min(cpt[, "xerror"])
+cp_opt   <- cpt[max(which(cpt[, "xerror"] <= cpt[i_min, "xerror"] + cpt[i_min, "xstd"])), "CP"]
+cart     <- prune(cart_raw, cp = cp_opt)
+
+# 8) Predicción y archivo para Kaggle
+pred_test <- predict(cart, newdata = test_model)
+pred_test <- pmax(pred_test, 0)  # por seguridad
+
+submission <- tibble(
+  !!(if (!is.null(id_col)) id_col else "id") := id_test,
+  price = round(pred_test)
+)
+readr::write_csv(submission, "submission_cart_from_ready.csv")
+cat("Archivo guardado: submission_cart_from_ready.csv\n")
+
+```
+
+## Random Forest
+
+```{r}
+id_vals <- if (!is.null(id_col) && id_col %in% names(test)) as.character(test[[id_col]]) else seq_len(nrow(test))
+if (!is.null(id_col)) { train[[id_col]] <- as.character(train[[id_col]]); test[[id_col]] <- as.character(test[[id_col]]) }
+train_model <- if (!is.null(id_col)) dplyr::select(train, -all_of(id_col)) else train
+test_model  <- if (!is.null(id_col)) dplyr::select(test,  -all_of(id_col))  else test
+# Entrenar RF sin tuning
+p  <- ncol(train_model) - 1L
+rf <- ranger(
+  formula         = as.formula(paste(tgt, "~ .")),
+  data            = train_model,
+  num.trees       = 1000,
+  mtry            = max(2L, floor(sqrt(p))),
+  min.node.size   = 8,
+  sample.fraction = 0.80,
+  importance      = "impurity",
+  seed            = 2025
+)
+
+# Predecir correctamente (nota: argumento es 'object')
+pred_test <- predict(object = rf, data = test_model)$predictions
+pred_test <- pmax(pred_test, 0)
+
+id_name <- if (!is.null(id_col)) id_col else "id"
+submission <- tibble(!!id_name := id_vals, price = round(pred_test))
+write_csv(submission, "submission_rf_notuned.csv")
+
+
+```
