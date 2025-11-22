@@ -144,7 +144,7 @@ skimr::skim(train)
 str(train)
 ```
 
-## Revisamos duplicados
+## Revisar duplicados
 
 ```{r}
 
@@ -167,12 +167,9 @@ if (!is.na(id_col)) {
 getwd()
 
 ```
-
 #Revisión de NA
 
 ```{r}
-
-
 # Calcular % de faltantes en TRAIN hogares
 faltantes_train <- train %>%
   summarise(across(everything(), ~mean(is.na(.)) * 100)) %>%
@@ -1047,8 +1044,6 @@ test_sf_final  <- test_sf_join
 La capa de parques se encontraba dañada por ende, en el siguiente bloque de codigo se repara:
 
 ```{r}
-
-
 # Función que extrae tags desde other_tags (si no existen)
 
 extract_tag <- function(df, key) {
@@ -1405,7 +1400,7 @@ train_text_features <- purrr::map_dfr(train_sf_clean$description, extract_from_t
 test_text_features  <- purrr::map_dfr(test_ready_osm_estrato$description, extract_from_text)
 
 # ======================================================
-# Conservar geometría (sin duplicados)
+# Conservar geometría 
 # ======================================================
 train_sf_clean1 <- train_sf_clean %>%
   st_drop_geometry() %>%
@@ -1833,6 +1828,9 @@ tabla_rangos_train0
 
 ```
 
+### BASES FINALES
+rm(train_final)
+rm(test_final)
 ```{r}
 train_final <- train_final0
 test_final <- test_final0
@@ -1900,6 +1898,90 @@ test_final <- test_final %>%
 
 ```
 
+
+Convertir SF a columnas longitud y latitud
+```{r}
+library(sf)
+library(dplyr)
+
+# Asegurar que está en CRS correcto
+train_final <- st_transform(train_final, 4326)
+test_final  <- st_transform(test_final, 4326)
+
+# Extraer coordenadas
+coords_train <- st_coordinates(train_final)
+coords_test  <- st_coordinates(test_final)
+
+# Crear columnas correctas
+train_final$longitude <- coords_train[, 1]
+train_final$latitude  <- coords_train[, 2]
+
+test_final$longitude <- coords_test[, 1]
+test_final$latitude  <- coords_test[, 2]
+
+# Eliminar geometría
+train_final <- train_final %>% st_drop_geometry()
+test_final  <- test_final  %>% st_drop_geometry()
+
+# Reordenar columnas (opcional)
+train_final <- train_final %>% select(everything(),longitude, latitude)
+test_final  <- test_final  %>% select(everything(),longitude, latitude)
+
+```
+
+Duplicados por titulo, descripcion, precio y coordenadas
+```{r}
+# Crear clave combinada con coordenadas, texto y precio
+train_final$coord_title_desc_price_key <- paste0(
+  train_final$latitude, "_",
+  train_final$longitude, "_",
+  train_final$title, "_",
+  train_final$description, "_",
+  train_final$price
+)
+
+# Detectar todas las combinaciones repetidas (sin importar cuántas veces)
+dup_keys <- train_final %>%
+  count(coord_title_desc_price_key) %>%
+  filter(n > 1)
+
+# Extraer todas las filas duplicadas completas
+dup_full <- train_final %>%
+  semi_join(dup_keys, by = "coord_title_desc_price_key") %>%
+  select(latitude, longitude, title, description, price, everything()) %>%
+  arrange(latitude, longitude, title, price)
+
+dup_full
+
+```
+
+```{r}
+original_nrow <- nrow(train_final)
+
+train_final$dup_key <- paste0(
+  train_final$latitude, "_",
+  train_final$longitude, "_",
+  train_final$title, "_",
+  train_final$description, "_",
+  train_final$price
+)
+
+train_final <- train_final %>%
+  distinct(dup_key, .keep_all = TRUE) %>%
+  select(-dup_key)
+
+n_eliminados <- original_nrow - nrow(train_final)
+n_eliminados
+
+
+
+```
+
+
+
+
+
+
 ```{r}
 library(dplyr)
 library(knitr)
@@ -1936,29 +2018,6 @@ kable(
 )
 
 ```
-
-
-
-IMPUTAR BATHROOMS Y ROOMS CON MEDIANA POR TIPO DE PROPIEDAD
-```{r}
-train_final <- train_final %>%
-  group_by(property_type) %>%
-  mutate(
-    rooms = ifelse(is.na(rooms), median(rooms, na.rm = TRUE), rooms),
-    bathrooms = ifelse(is.na(bathrooms), median(bathrooms, na.rm = TRUE), bathrooms)
-  ) %>% ungroup()
-
-test_final <- test_final %>%
-  group_by(property_type) %>%
-  mutate(
-    rooms = ifelse(is.na(rooms), median(rooms, na.rm = TRUE), rooms),
-    bathrooms = ifelse(is.na(bathrooms), median(bathrooms, na.rm = TRUE), bathrooms)
-  ) %>% ungroup()
-
-```
-
-
-
 TITLE Y DESCRIPTION
 ```{r}
 train_final$title[is.na(train_final$title)] <- ""
@@ -1969,6 +2028,294 @@ test_final$description[is.na(test_final$description)] <- ""
 
 ```
 
+
+IMPUTACION DE BATHROOMS Y ROOMS AMBIENTES
+
+```{r}
+library(dplyr)
+
+# ===========================================
+# 0. AJUSTAR BEDROOMS SEGÚN REGLA DEFINIDA
+# ===========================================
+
+fix_bedrooms <- function(df) {
+  df %>%
+    mutate(
+      bedrooms = case_when(
+        bedrooms == 1 ~ 1,      # si ya es 1, se mantiene
+        rooms == 1 ~ 1,         # si rooms = 1 → bedrooms = 1
+        TRUE ~ bedrooms         # en otros casos no se modifica
+      )
+    )
+}
+
+train_final <- fix_bedrooms(train_final)
+test_final  <- fix_bedrooms(test_final)
+
+# ===========================================
+# 1. IMPUTACIÓN DE BATHROOMS POR REGLAS
+# (Incluye regla: bedrooms==0 o rooms==0 → 1 baño)
+# ===========================================
+
+impute_bathrooms <- function(df) {
+  df %>%
+    mutate(
+      bathrooms = case_when(
+        !is.na(bathrooms) ~ bathrooms,        # ya existe → no tocar
+
+        # Nueva regla solicitada
+        bedrooms == 0 ~ 1,
+        rooms == 0 ~ 1,
+
+        # Reglas anteriores
+        bedrooms == 1 ~ 1,
+        bedrooms == 2 ~ 1,
+        bedrooms == 3 ~ 2,
+        bedrooms == 4 ~ 3,
+        bedrooms >= 5 ~ 4,
+
+        TRUE ~ bathrooms
+      )
+    )
+}
+
+train_final <- impute_bathrooms(train_final)
+test_final  <- impute_bathrooms(test_final)
+
+# ===========================================
+# 2. IMPUTACIÓN DE ROOMS (AMBIENTES)
+# ===========================================
+
+impute_rooms <- function(df) {
+  df %>%
+    mutate(
+      rooms = case_when(
+        !is.na(rooms) ~ rooms,           # ya existe → no modificar
+        bedrooms >= 1 ~ bedrooms + 1,    # regla estándar
+        TRUE ~ 1                         # fallback final
+      )
+    )
+}
+
+train_final <- impute_rooms(train_final)
+test_final  <- impute_rooms(test_final)
+
+```
+
+
+
+
+```{r}
+summary(train_final$bathrooms)
+summary(train_final$rooms)
+
+summary(test_final$bathrooms)
+summary(test_final$rooms)
+
+```
+
+```{r}
+library(dplyr)
+
+missing_summary <- function(df) {
+  data.frame(
+    variable = names(df),
+    n_na = colSums(is.na(df)),
+    pct_na = round(colMeans(is.na(df)) * 100, 2)
+  ) %>% 
+    arrange(desc(pct_na))
+}
+
+missing_test <- missing_summary(test_final)
+missing_test
+
+```
+
+IMPUTAR SURFACE
+```{r}
+library(dplyr)
+library(purrr)
+
+# ======================================================
+# 1. TABLAS DE MEDIANAS POR NIVELES
+# ======================================================
+
+surface_stats <- train_final %>%
+  group_by(property_type, bedrooms, bathrooms) %>%
+  summarise(
+    med_total   = median(surface_total, na.rm = TRUE),
+    med_covered = median(surface_covered, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+surface_stats_bed <- train_final %>%
+  group_by(property_type, bedrooms) %>%
+  summarise(
+    med_total   = median(surface_total, na.rm = TRUE),
+    med_covered = median(surface_covered, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+surface_stats_type <- train_final %>%
+  group_by(property_type) %>%
+  summarise(
+    med_total   = median(surface_total, na.rm = TRUE),
+    med_covered = median(surface_covered, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+global_medians <- list(
+  med_total   = median(train_final$surface_total, na.rm = TRUE),
+  med_covered = median(train_final$surface_covered, na.rm = TRUE)
+)
+
+# Reemplazar NA por medianas globales
+surface_stats$med_total[is.na(surface_stats$med_total)]             <- global_medians$med_total
+surface_stats$med_covered[is.na(surface_stats$med_covered)]         <- global_medians$med_covered
+surface_stats_bed$med_total[is.na(surface_stats_bed$med_total)]     <- global_medians$med_total
+surface_stats_bed$med_covered[is.na(surface_stats_bed$med_covered)] <- global_medians$med_covered
+surface_stats_type$med_total[is.na(surface_stats_type$med_total)]   <- global_medians$med_total
+surface_stats_type$med_covered[is.na(surface_stats_type$med_covered)] <- global_medians$med_covered
+
+# ======================================================
+# 2. FUNCIÓN ROBUSTA QUE NUNCA DEVUELVE NA
+# ======================================================
+
+get_surface_values <- function(ptype, beds, baths) {
+
+  # Nivel 1: tipo + bedrooms + bathrooms
+  row1 <- surface_stats %>% 
+    filter(property_type == ptype,
+           bedrooms == beds,
+           bathrooms == baths)
+  if (nrow(row1) == 1) return(c(row1$med_total, row1$med_covered))
+
+  # Nivel 2: tipo + bedrooms
+  row2 <- surface_stats_bed %>% 
+    filter(property_type == ptype,
+           bedrooms == beds)
+  if (nrow(row2) == 1) return(c(row2$med_total, row2$med_covered))
+
+  # Nivel 3: tipo de propiedad
+  row3 <- surface_stats_type %>% 
+    filter(property_type == ptype)
+  if (nrow(row3) == 1) return(c(row3$med_total, row3$med_covered))
+
+  # Nivel 4: fallback global
+  return(c(global_medians$med_total, global_medians$med_covered))
+}
+
+# ======================================================
+# 3. IMPUTACIÓN SIN ERRORES (usa purrr::pluck)
+# ======================================================
+
+impute_surface_median <- function(df) {
+
+  df %>%
+    rowwise() %>%
+    mutate(
+      vals = list(get_surface_values(property_type, bedrooms, bathrooms)),
+
+      expected_total   = pluck(vals, 1),
+      expected_covered = pluck(vals, 2),
+
+      surface_total = if_else(is.na(surface_total), expected_total, surface_total),
+      surface_covered = if_else(is.na(surface_covered), expected_covered, surface_covered),
+
+      surface_total = if_else(surface_covered > surface_total,
+                              surface_covered,
+                              surface_total)
+    ) %>%
+    ungroup() %>%
+    select(-vals, -expected_total, -expected_covered)
+}
+
+# ======================================================
+# 4. APLICAR IMPUTACIÓN
+# ======================================================
+
+train_final <- impute_surface_median(train_final)
+test_final  <- impute_surface_median(test_final)
+
+
+
+# ======================================================
+# 5. ELIMINAR VARIABLE INNECESARIA
+# ======================================================
+
+train_final <- train_final %>% select(-any_of("coord_title_desc_price_key"))
+test_final  <- test_final  %>% select(-any_of("coord_title_desc_price_key"))
+
+# ======================================================
+# 6. REDONDEAR SUPERFICIES
+# ======================================================
+
+train_final <- train_final %>%
+  mutate(
+    surface_total   = round(surface_total),
+    surface_covered = round(surface_covered)
+  )
+
+test_final <- test_final %>%
+  mutate(
+    surface_total   = round(surface_total),
+    surface_covered = round(surface_covered)
+  )
+
+```
+
+```{r}
+library(dplyr)
+
+missing_summary <- function(df) {
+  data.frame(
+    variable = names(df),
+    n_na = colSums(is.na(df)),
+    pct_na = round(colMeans(is.na(df)) * 100, 4)
+  ) %>%
+    arrange(desc(n_na))
+}
+
+# Faltantes en train_final
+faltantes_train <- missing_summary(train_final)
+faltantes_train
+
+# Faltantes en test_final
+faltantes_test <- missing_summary(test_final)
+faltantes_test
+
+
+
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Histograma de surface_total
+ggplot(train_final %>% filter(!is.na(surface_total)), 
+       aes(x = surface_total)) +
+  geom_histogram(bins = 40, color = "white", fill = "steelblue") +
+  labs(
+    title = "Distribución de Surface Total",
+    x = "Surface Total (m2)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+
+# Histograma de surface_covered
+ggplot(train_final %>% filter(!is.na(surface_covered)), 
+       aes(x = surface_covered)) +
+  geom_histogram(bins = 40, color = "white", fill = "darkorange") +
+  labs(
+    title = "Distribución de Surface Covered",
+    x = "Surface Covered (m2)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+
+```
 
 
 
