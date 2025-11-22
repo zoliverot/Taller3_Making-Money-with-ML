@@ -102,7 +102,7 @@ tabla_comp_prop <- comp_bd_prop %>%
     heading.align = "center"
   )
 
-#Gurdamos y exportamos
+#Guardamos y exportamos
 
 root_dir <- here::here()
 path_outputs <- file.path(root_dir, "outputs")
@@ -165,9 +165,10 @@ if (!is.na(id_col)) {
 }
 
 getwd()
+
 ```
 
-#Revisón de NA
+#Revisión de NA
 
 ```{r}
 
@@ -218,9 +219,7 @@ grafico_faltantes <- ggplot(faltantes_comp, aes(x = Variable, y = Porcentaje_NA,
     values = c("Entrenamiento" = "lightyellow4", "Prueba" = "#FFFF00")
   )
 
-
-
-#Gardar Gráfica
+#Guardar Gráfica
 
 root_dir <- here::here()
 
@@ -451,106 +450,6 @@ test_txt  <- add_text_dummies(test)
 colMeans(dplyr::select(train_txt, starts_with("has_")), na.rm = TRUE)
 colMeans(dplyr::select(test_txt,  starts_with("has_")), na.rm = TRUE)
 ```
-
-# Variables Internas (4 variables que salen de la columna de texto en ambas bases de datos)
-
-```{r}
-# Función para evaluar variables binarias vs. precio
-
-score_one_attr <- function(df, attr_col, target = "price") {
-  g <- df %>%
-    summarise(
-      mean1 = mean(.data[[target]][.data[[attr_col]] == 1], na.rm = TRUE),
-      mean0 = mean(.data[[target]][.data[[attr_col]] == 0], na.rm = TRUE),
-      n1    = sum(.data[[attr_col]] == 1, na.rm = TRUE),
-      n0    = sum(.data[[attr_col]] == 0, na.rm = TRUE),
-      .groups = "drop"
-    )
-
-  effect   <- g$mean1 - g$mean0
-  pct_diff <- ifelse(is.finite(g$mean0) && g$mean0 != 0, effect / g$mean0, NA_real_)
-  grand    <- mean(df[[target]], na.rm = TRUE)
-  ss_between <- g$n1 * (g$mean1 - grand)^2 + g$n0 * (g$mean0 - grand)^2
-  ss_total   <- sum((df[[target]] - grand)^2, na.rm = TRUE)
-  eta2 <- ifelse(ss_total > 0, ss_between / ss_total, 0)
-
-  tibble(
-    variable = attr_col,
-    support_1 = g$n1,
-    rate_1 = g$n1 / (g$n1 + g$n0),
-    mean_price_1 = g$mean1,
-    mean_price_0 = g$mean0,
-    mean_diff = effect,
-    pct_diff = pct_diff,
-    eta2 = eta2
-  )
-}
-
-# Separar por tipo de propiedad
-
-train_apto <- train_txt %>% filter(property_type %in% c("Apartamento"))
-train_casa <- train_txt %>% filter(property_type %in% c("Casa"))
-
-
-#  Seleccionar variables dummies
-
-flag_cols <- names(train_txt)[grepl("^has_", names(train_txt))]
-
-
-#  Evaluar cada dummy por grupo
-
-stats_apto <- map_dfr(flag_cols, ~score_one_attr(train_apto, .x, target = "price")) %>%
-  mutate(tipo = "Apartamento")
-stats_casa <- map_dfr(flag_cols, ~score_one_attr(train_casa, .x, target = "price")) %>%
-  mutate(tipo = "Casa")
-
-# Combinar resultados
-stats_all <- bind_rows(stats_apto, stats_casa)
-
-
-#  Ranking y selección de las mejores
-
-ranked <- stats_all %>%
-  filter(rate_1 >= 0.03) %>% # Al menos 3% de cobertura
-  mutate(rank_score = eta2 * 0.5 + abs(pct_diff) * 0.3 + rate_1 * 0.2) %>%
-  arrange(tipo, desc(rank_score))
-
-# Top 5 por tipo
-top_by_type <- ranked %>%
-  group_by(tipo) %>%
-  slice_max(order_by = rank_score, n = 5) %>%
-  ungroup() %>%
-  mutate(
-    pct_diff = percent(pct_diff, accuracy = 0.1),
-    rate_1 = percent(rate_1, accuracy = 0.1)
-  ) %>%
-  select(tipo, variable, rate_1, mean_price_1, mean_price_0, pct_diff, eta2)
-
-
-# 5 Resultado
-
-print(top_by_type, n = Inf)
-
-
-# Variables finales seleccionadas
-best_vars <- unique(top_by_type$variable)
-print(best_vars)
-
-
-#  Crear datasets finales coherentes
-
-add_best_vars <- function(df, vars) {
-  # Asegura que las columnas existan en test
-  for (nm in vars) if (!nm %in% names(df)) df[[nm]] <- 0L
-  df %>% mutate(across(all_of(vars), ~as.integer(.)))
-}
-
-train_ready <- add_best_vars(train_txt, best_vars)
-test_ready  <- add_best_vars(test_txt,  best_vars)
-
-
-```
-
 # Obtención de variables a partir de otras fuentes
 
 ### Variables de Open Street Map
@@ -1322,9 +1221,10 @@ library(stringr)
 # ======================================================
 # Conversor palabras → números
 # ======================================================
+
 word_to_num <- function(x) {
   dic <- c(
-    "uno"=1,"una"=1,"dos"=2,"tres"=3,"cuatro"=4,"cinco"=5,
+    "un"=1,"uno"=1,"una"=1,"dos"=2,"tres"=3,"cuatro"=4,"cinco"=5,
     "seis"=6,"siete"=7,"ocho"=8,"nueve"=9,"diez"=10
   )
   dic[x]
@@ -1332,17 +1232,17 @@ word_to_num <- function(x) {
 
 # ======================================================
 # Función general de extracción
-#  ✓ Detecta "35 baños" → 3.5 → 4
-#  ✓ Detecta "1002 banos" → 2
-#  ✓ Maneja "baño y medio" → 1.5 → 2
-#  ✓ Maneja decimales "1.5 baños" → 2
+#  Detecta "35 baños" → 3.5 → 4
+#  Detecta "1002 banos" → 2
+#  Maneja "baño y medio" → 1.5 → 2
+#  Maneja decimales "1.5 baños" → 2
 # ======================================================
 extract_count <- function(text, num_regex, word_regex, base_words) {
 
   txt <- tolower(text)
 
   # =====================================================
-  # 0) DECIMALES reales tipo "1.5 baños"
+  # 0) DECIMALES tipo "1.5 baños"
   # =====================================================
   frac_num <- str_match(txt, "(\\d+\\.\\d)\\s*(baños|banos|baño|bano|bao|baos|wc)")
   if (!is.na(frac_num[1])) {
@@ -1351,19 +1251,17 @@ extract_count <- function(text, num_regex, word_regex, base_words) {
   }
 
   # =====================================================
-  # 1) Interpretar "35 baños" como 3.5 → 4
+  # 1) Dos dígitos "35 baños" → 3.5
   # =====================================================
   two_digit <- str_match(txt, "\\b(\\d{2})\\s*(baños|banos|baño|bano|bao|baos|wc)")
   if (!is.na(two_digit[1])) {
     num <- as.numeric(two_digit[2])
-    d1 <- floor(num / 10)
-    d2 <- num %% 10
-    val <- d1 + d2/10    # 35 → 3.5
-    return(round(val))   # redondear a entero
+    val <- floor(num/10) + (num %% 10)/10
+    return(round(val))
   }
 
   # =====================================================
-  # 2) "1002 banos" → 2
+  # 2) "1002 baños" → 2
   # =====================================================
   big_fix <- str_match(txt, "\\b(\\d{3,4})\\s*(baños|banos|baño|bano|bao|baos|wc)")
   if (!is.na(big_fix[1])) {
@@ -1372,57 +1270,54 @@ extract_count <- function(text, num_regex, word_regex, base_words) {
   }
 
   # =====================================================
-  # 3) "1 baño y medio" → 1.5 → 2
+  # 3) "1 baño y medio" / "dos baños y medio"
   # =====================================================
   half_num <- str_match(txt, "(\\d+)\\s*(baños|banos|baño|bano|bao|baos|wc)\\s*y\\s*medio")
-  if (!is.na(half_num[1])) {
-    val <- as.numeric(half_num[2]) + 0.5
-    return(round(val))
-  }
+  if (!is.na(half_num[1])) return(round(as.numeric(half_num[2]) + 0.5))
 
-  # "dos baños y medio" → 2.5 → 3
-  half_word <- str_match(txt,
-    "(uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(baños|banos|baño|bano|bao|baos|wc)\\s*y\\s*medio"
+  half_word <- str_match(
+    txt,
+    "(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(baños|banos|baño|bano|bao|baos|wc)\\s*y\\s*medio"
   )
-  if (!is.na(half_word[1])) {
-    val <- word_to_num(half_word[2]) + 0.5
-    return(round(val))
+  if (!is.na(half_word[1])) return(round(word_to_num(half_word[2]) + 0.5))
+
+  if (str_detect(txt, "medio\\s*(baño|banos|baños|wc)")) return(1)
+
+  # =====================================================
+  # 4) Números normales — SOLO si num_regex no es NULL
+  # =====================================================
+  nums <- numeric(0)
+  if (!is.null(num_regex)) {
+    nums_raw <- str_extract_all(txt, num_regex)[[1]]
+    if (length(nums_raw) > 0)
+      nums <- as.numeric(str_extract(nums_raw, "\\d+"))
   }
 
-  # "medio baño" → 0.5 → 1
-  if (str_detect(txt, "medio\\s*(baño|banos|baños|wc)"))
-    return(1)
-
   # =====================================================
-  # 4) Números normales ("3 baños", "2 cuartos")
+  # 5) Palabras — SOLO si word_regex no es NULL
   # =====================================================
-  nums_raw <- str_extract_all(txt, num_regex)[[1]]
-  nums <- numeric(0)
-  if (length(nums_raw) > 0)
-    nums <- as.numeric(str_extract(nums_raw, "\\d+"))
-
-  # =====================================================
-  # 5) Palabras ("dos baños")
-  # =====================================================
-  words_raw <- str_match_all(txt, word_regex)[[1]]
   nums_word <- numeric(0)
-  if (length(words_raw) > 0)
-    nums_word <- as.numeric(word_to_num(words_raw[,2]))
+  if (!is.null(word_regex)) {
+    words_raw <- str_match_all(txt, word_regex)[[1]]
+    if (length(words_raw) > 0)
+      nums_word <- as.numeric(word_to_num(words_raw[,2]))
+  }
 
   vals <- c(nums, nums_word)
   vals <- vals[!is.na(vals)]
-  vals <- vals[vals >= 1 & vals <= 12]  # rango razonable
+  vals <- vals[vals >= 1 & vals <= 12]
 
   if (length(vals) > 0) return(max(vals))
 
   # =====================================================
-  # 6) Solo aparece la palabra → asignar 1
+  # 6) Si aparece la palabra base → 1
   # =====================================================
   if (str_detect(txt, paste0("\\b(", paste(base_words, collapse="|"), ")\\b")))
     return(1)
 
   return(NA_real_)
 }
+  
 
 # ======================================================
 # EXTRACTOR CORRECTO SOLO PARA ÁREA
@@ -1473,22 +1368,32 @@ extract_from_text <- function(text) {
   baños <- extract_count(
     text,
     num_regex  = "(\\d+)\\s*(baños|banos|baño|bano|bao|baos|wc)",
-    word_regex = "(uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(baños|banos|baño|bano|bao|baos|wc)",
+    word_regex = "(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(baños|banos|baño|bano|bao|baos|wc)",
     base_words = c("baños","banos","baño","bano","bao","baos","wc")
   )
 
-  habs <- extract_count(
-    text,
-    num_regex  = "(\\d+)\\s*(habitaciones|habitacion|cuartos|cuarto|alcobas|alcoba)",
-    word_regex = "(uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\\s*(habitaciones|habitacion|cuartos|cuarto|alcobas|alcoba)",
-    base_words = c("habitaciones","habitacion","cuartos","cuarto","alcobas","alcoba")
+ # AMBIENTES (rooms)
+  ambientes <- extract_count(
+  text,
+  num_regex  = NULL,
+  word_regex = NULL,
+  base_words = c(
+    "sala",
+    "comedor",
+    "estudio",
+    "sala-comedor",
+    "sala comedor",
+    "salas comedor",
+    "salacomedor"
   )
+)
 
+  
   area <- extract_area(text)
 
   tibble(
     text_bathrooms = baños,
-    text_bedrooms  = habs,
+    text_rooms  = ambientes,
     text_surface   = area
   )
 }
@@ -1522,8 +1427,8 @@ fill_from_text <- function(df) {
     mutate(
       bathrooms = ifelse(is.na(bathrooms) & !is.na(text_bathrooms),
                          text_bathrooms, bathrooms),
-      bedrooms = ifelse(is.na(bedrooms) & !is.na(text_bedrooms),
-                        text_bedrooms, bedrooms),
+      rooms = ifelse(is.na(rooms) & !is.na(text_rooms),
+                        text_rooms, rooms),
       surface_total = ifelse(is.na(surface_total) & !is.na(text_surface),
                              text_surface, surface_total)
     )
@@ -1657,6 +1562,7 @@ cat("**Resumen de registros eliminados**\n")
 cat("Train eliminados:", train_eliminados, "\n")
 
 ```
+
 valores faltantes en Train
 ```{r}
 faltantes_train1 <- train_sf_clean1 %>%
@@ -1700,7 +1606,7 @@ train_sf_clean1 %>%
 registros_banos_altos1 <- train_sf_clean1 %>%
   st_drop_geometry() %>%
   filter(bathrooms > 10) %>%
-  select(bathrooms, bedrooms, surface_total, description)
+  select(bathrooms, rooms, surface_total, description)
 
 registros_banos_altos1
 
@@ -1711,11 +1617,11 @@ library(ggplot2)
 
 train_sf_clean1 %>%
   st_drop_geometry() %>%
-  ggplot(aes(x = bedrooms)) +
+  ggplot(aes(x = rooms)) +
   geom_histogram(bins = 30, fill = "#1f78b4", color = "white", alpha = 0.8) +
   labs(
-    title = "Distribución de cuartos — TRAIN",
-    x = "Número de baños",
+    title = "Distribución de ambientes — TRAIN",
+    x = "Número de ambientes",
     y = "Frecuencia"
   ) +
   theme_minimal(base_size = 14)
@@ -1810,12 +1716,13 @@ tabla_surface
 ```{r}
 casos_graves <- train_sf_clean1 %>%
   filter(surface_total >= 5000) %>%
-  select(price, surface_total, bedrooms, bathrooms, description)
+  select(price, surface_total, rooms, bathrooms, description)
 
 casos_graves
 
 ```
 
+reemplazar valores por NA
 ```{r}
 train_sf_clean1 <- train_sf_clean1 %>%
   mutate(surface_total = ifelse(surface_total >= 2000 | surface_total < 30,
@@ -1826,7 +1733,6 @@ test_ready_osm_estrato1 <- test_ready_osm_estrato1 %>%
   mutate(surface_total = ifelse(surface_total >= 2000 | surface_total < 30,
                                 NA,
                                 surface_total))
-
 
 ```
 
@@ -1861,192 +1767,32 @@ train_sf_clean1 %>%
 ```
 
 ```{r}
-library(tidyverse)
-library(sf)
-library(tidymodels)
-library(recipes)
-library(stringr)
 
-# =======================================================
-# 1) FIX LÓGICO surface_total ↔ surface_covered
-# =======================================================
-
-mutual_surface_fix <- function(df) {
+fix_surfaces <- function(df) {
   df %>%
     mutate(
-      surface_total = ifelse(
-        is.na(surface_total) & !is.na(surface_covered),
-        surface_covered, surface_total
-      ),
-      surface_covered = ifelse(
-        is.na(surface_covered) & !is.na(surface_total),
-        surface_total, surface_covered
-      )
+      # 1) Rellenar faltantes cruzados
+      surface_total = ifelse(is.na(surface_total) & !is.na(surface_covered),
+                             surface_covered, surface_total),
+      surface_covered = ifelse(is.na(surface_covered) & !is.na(surface_total),
+                               surface_total, surface_covered),
+
+      # 2) Corregir inconsistencias (covered < total)
+      surface_covered = ifelse(!is.na(surface_total) &
+                               !is.na(surface_covered) &
+                               surface_covered < surface_total,
+                               surface_total, surface_covered)
     )
 }
 
-train_sf_clean2 <- mutual_surface_fix(train_sf_clean1)
-test_ready_osm_estrato2 <- mutual_surface_fix(test_ready_osm_estrato1)
 
 
-# =======================================================
-# 2) Preparación de dataset TABULAR para imputar
-# =======================================================
-
-train_imp <- train_sf_clean2 %>%
-  st_drop_geometry() %>%
-  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
-
-test_imp <- test_ready_osm_estrato2 %>%
-  st_drop_geometry() %>%
-  select(surface_total, surface_covered, bedrooms, bathrooms, property_type)
-
-# Combinar para imputar de forma conjunta
-full <- bind_rows(
-  train_imp %>% mutate(dataset = "train"),
-  test_imp  %>% mutate(dataset = "test")
-)
-
-# Factor necesario para Random Forest
-full$property_type <- as.factor(full$property_type)
-
-
-# =======================================================
-# 3) Función general de imputación (Random Forest)
-# =======================================================
-
-impute_var <- function(data, target, predictors) {
-  
-  df <- data
-  
-  # Filtrar datos completos
-  complete_rows <- df %>% drop_na(all_of(c(target, predictors)))
-  missing_rows  <- df %>% filter(is.na(.data[[target]]))
-  
-  # Si no hay NA, devolver df
-  if (nrow(missing_rows) == 0) return(df)
-  
-  # Receta del modelo
-  rec <- recipe(as.formula(
-    paste(target, "~", paste(predictors, collapse = "+"))
-  ), data = complete_rows)
-  
-  # Modelo
-  mod <- rand_forest(mtry = 2, trees = 300, min_n = 5) %>%
-    set_engine("ranger") %>%
-    set_mode("regression")
-  
-  wf <- workflow() %>% add_recipe(rec) %>% add_model(mod)
-  
-  # Fit
-  fit_mod <- fit(wf, complete_rows)
-  
-  # Predicciones
-  preds <- predict(fit_mod, missing_rows) %>% pull(.pred)
-  
-  df[[target]][is.na(df[[target]])] <- preds
-  
-  df
-}
-
-
-# =======================================================
-# 4) IMPUTACIÓN EN ORDEN ÓPTIMO
-# =======================================================
-
-library(recipes)
-
-rec <- recipe(~ ., data = full) %>%
-  
-  # Imputar áreas
-  step_impute_bag(surface_total,
-                  impute_with = imp_vars(surface_covered, bedrooms, bathrooms, property_type)) %>%
-  
-  step_impute_bag(surface_covered,
-                  impute_with = imp_vars(surface_total, bedrooms, bathrooms, property_type)) %>%
-  
-  # Imputar habitaciones
-  step_impute_bag(bedrooms,
-                  impute_with = imp_vars(surface_total, surface_covered, bathrooms, property_type)) %>%
-  
-  # Imputar baños
-  step_impute_bag(bathrooms,
-                  impute_with = imp_vars(surface_total, surface_covered, bedrooms, property_type))
-
-# Preparar receta
-rec_prep <- prep(rec)
-
-# Aplicar imputaciones
-full <- bake(rec_prep, full)
-
-
-# =======================================================
-# 5) Separar TRAIN / TEST
-# =======================================================
-
-train_imputed <- full %>% filter(dataset == "train") %>% select(-dataset)
-test_imputed  <- full %>% filter(dataset == "test")  %>% select(-dataset)
-
-
-# =======================================================
-# 6) Insertar imputaciones en las bases sf originales
-# =======================================================
-
-train_final0 <- train_sf_clean2 %>%
-  mutate(
-    surface_total   = train_imputed$surface_total,
-    surface_covered = train_imputed$surface_covered,
-    bedrooms        = train_imputed$bedrooms,
-    bathrooms       = train_imputed$bathrooms
-  )
-
-test_final0 <- test_ready_osm_estrato2 %>%
-  mutate(
-    surface_total   = test_imputed$surface_total,
-    surface_covered = test_imputed$surface_covered,
-    bedrooms        = test_imputed$bedrooms,
-    bathrooms       = test_imputed$bathrooms
-  )
-
-
-# =======================================================
-# 7) Validación de inconsistencias (muy importante)
-# =======================================================
-
-# Cubierta no puede ser mayor que total
-inconsistencias_train <- train_final0 %>%
-  filter(surface_covered > surface_total) %>%
-  select(surface_total, surface_covered)
-
-inconsistencias_test <- test_final0 %>%
-  filter(surface_covered > surface_total) %>%
-  select(surface_total, surface_covered)
-
-cat("\nInconsistencias en TRAIN:", nrow(inconsistencias_train), "\n")
-cat("Inconsistencias en TEST:", nrow(inconsistencias_test), "\n")
-
-# Mostrar algunos casos si existen:
-head(inconsistencias_train)
-head(inconsistencias_test)
-
-# =======================================================
-# 8) REPARAR INCONSISTENCIAS DESPUÉS DE IMPUTAR
-# =======================================================
-
-fix_inconsistencias <- function(df) {
-  df %>%
-    mutate(surface_total = pmax(surface_total, surface_covered))
-}
-
-train_final0 <- fix_inconsistencias(train_final0)
-test_final0  <- fix_inconsistencias(test_final0)
-
-sum(train_final0$surface_covered > train_final0$surface_total)
-sum(test_final0$surface_covered > test_final0$surface_total)
-
-
+train_final0 <- fix_surfaces(train_sf_clean1)
+test_final0 <- fix_surfaces(test_ready_osm_estrato1)
 
 ```
+
+
 ```{r}
 plot_surface_total_zoom <- function(df, name){
   df2 <- df %>% st_drop_geometry()
@@ -2112,9 +1858,7 @@ ggplot(df %>% filter(surface_covered <= lim),
 ### Revisión final de datos y eliminación de variables no necesarias
 
 ```{r}
-#Miramos que variables tenemos
-colnames(train_final)
-#Eliminamos variables innecesarias
+# 1. Eliminar columnas innecesarias
 cols_to_drop <- c(
   "codigo_lote_llave",
   "text_bathrooms",
@@ -2123,119 +1867,72 @@ cols_to_drop <- c(
 )
 
 train_final <- train_final %>% select(-any_of(cols_to_drop))
-test_final <- test_final%>% select(-any_of(cols_to_drop))
+test_final  <- test_final  %>% select(-any_of(cols_to_drop))
 
-
-# Revisamos estructura de datos que coincida con lo que es: 
-str(train_final)
-
-#
+# 2. Convertir property_type
 train_final$property_type <- as.factor(train_final$property_type)
-test_final$property_type <- as.factor(test_final$property_type)
+test_final$property_type  <- as.factor(test_final$property_type)
 
-# 2. Lista de dummies
+# 3. Convertir dummies a factor
 dummy_vars <- c(
-  "has_parqueadero_garaje",
-  "has_seguridad",
-  "has_ascensor",
-  "has_gimnasio",
-  "has_piscina",
-  "has_bbq",
-  "has_salon_social",
-  "has_zona_infantil",
-  "has_balcon",
-  "has_terraza",
-  "has_patio",
-  "has_jardin_exterior",
-  "has_chimenea",
-  "has_cocina_integral",
-  "has_deposito",
-  "has_estudio",
-  "has_remodelado",
-  "has_vista",
-  "has_pisos_vivienda"
+  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio",
+  "has_piscina","has_bbq","has_salon_social","has_zona_infantil",
+  "has_balcon","has_terraza","has_patio","has_jardin_exterior",
+  "has_chimenea","has_cocina_integral","has_deposito","has_estudio",
+  "has_remodelado","has_vista","has_pisos_vivienda"
 )
 
-# Convertir dummies a factor
-train_final <- train_final %>% mutate(across(all_of(dummy_vars), ~as.factor(.)))
-test_final <- test_final %>% mutate(across(all_of(dummy_vars), ~as.factor(.)))
+train_final <- train_final %>% mutate(across(all_of(dummy_vars), as.factor))
+test_final  <- test_final  %>% mutate(across(all_of(dummy_vars), as.factor))
 
-# Redondear en train
+# 4. Redondear variables numéricas
 train_final <- train_final %>% 
   mutate(
-    bathrooms = ifelse(!is.na(bathrooms), round(bathrooms), bathrooms),
-    bedrooms  = ifelse(!is.na(bedrooms),  round(bedrooms),  bedrooms)
+    bathrooms = round(bathrooms),
+    bedrooms  = round(bedrooms)
   )
 
-# Redondear en test
 test_final <- test_final %>% 
   mutate(
-    bathrooms = ifelse(!is.na(bathrooms), round(bathrooms), bathrooms),
-    bedrooms  = ifelse(!is.na(bedrooms),  round(bedrooms),  bedrooms)
+    bathrooms = round(bathrooms),
+    bedrooms  = round(bedrooms)
   )
 
-#Exportar
-
-
-# Transformar a geográfico
-train_final <- st_transform(train_final, 4326)
-test_final  <- st_transform(test_final, 4326)
-
-# Extraer coordenadas
-train_xy <- st_coordinates(train_final)
-test_xy  <- st_coordinates(test_final)
-
-# Asegurar que las variables queden correctas:
-# X = longitud
-# Y = latitud
-train_final$longitude <- train_xy[, "X"]
-train_final$latitude  <- train_xy[, "Y"]
-
-test_final$longitude <- test_xy[, "X"]
-test_final$latitude  <- test_xy[, "Y"]
-
-# Eliminar geometría
-train_final <- train_final %>% st_drop_geometry()
-test_final  <- test_final  %>% st_drop_geometry()
-
-fix_lon_lat <- function(df) {
-  lon <- df$latitude
-  lat <- df$longitude
-  df$longitude <- lon
-  df$latitude  <- lat
-  df
-}
-
-train_final<- fix_lon_lat(train_final)
-test_final  <- fix_lon_lat(test_final)
-
-
-
-# Ruta dinámica
-
-
+# 5. Exportar
 output_dir <- here::here("data", "processed")
-
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
-write.csv(train_final,
-          file.path(output_dir, "train_final.csv"),
-          row.names = FALSE)
+write.csv(train_final, file.path(output_dir, "train_final.csv"), row.names = FALSE)
+write.csv(test_final,  file.path(output_dir, "test_final.csv"),  row.names = FALSE)
 
-write.csv(test_final,
-          file.path(output_dir, "test_final.csv"),
-          row.names = FALSE)
+saveRDS(train_final, file.path(output_dir, "train_final.rds"))
+saveRDS(test_final,  file.path(output_dir, "test_final.rds"))
 
-saveRDS(
-  train_final,
-  file.path(output_dir, "train_final.rds")
-)
 
-saveRDS(
-  test_final,
-  file.path(output_dir, "test_final.rds")
-)
+```
 
+
+
+```{r}
+library(dplyr)
+
+# Función para resumir faltantes
+missing_summary <- function(df) {
+  data.frame(
+    variable = names(df),
+    n_na = colSums(is.na(df)),
+    pct_na = round(colMeans(is.na(df))*100, 2)
+  ) %>% 
+    arrange(desc(pct_na))
+}
+
+# Resumen train
+missing_train <- missing_summary(train_final)
+missing_train
+
+# Resumen test
+missing_test <- missing_summary(test_final)
+missing_test
 
 ```
 
