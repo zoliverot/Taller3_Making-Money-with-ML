@@ -1862,7 +1862,7 @@ ggplot(df %>% filter(surface_covered <= lim),
 cols_to_drop <- c(
   "codigo_lote_llave",
   "text_bathrooms",
-  "text_bedrooms",
+  "text_rooms",
   "text_surface"
 )
 
@@ -1889,15 +1889,91 @@ test_final  <- test_final  %>% mutate(across(all_of(dummy_vars), as.factor))
 train_final <- train_final %>% 
   mutate(
     bathrooms = round(bathrooms),
-    bedrooms  = round(bedrooms)
+    rooms  = round(rooms)
   )
 
 test_final <- test_final %>% 
   mutate(
     bathrooms = round(bathrooms),
-    bedrooms  = round(bedrooms)
+    rooms  = round(rooms)
   )
 
+```
+
+```{r}
+library(dplyr)
+library(knitr)
+
+# Función para calcular NA y %
+missing_summary_f <- function(df) {
+  data.frame(
+    variable = names(df),
+    n_na = colSums(is.na(df)),
+    pct_na = round(colMeans(is.na(df)) * 100, 2)
+  )
+}
+
+# Resumen train y test
+miss_train_f <- missing_summary_f(train_final)
+miss_test_f  <- missing_summary_f(test_final)
+
+# Unir y ordenar por NA de train
+missing_table_f <- miss_train_f %>%
+  rename(n_na_train = n_na,
+         pct_na_train = pct_na) %>%
+  left_join(
+    miss_test_f %>% rename(n_na_test = n_na,
+                         pct_na_test = pct_na),
+    by = "variable"
+  ) %>%
+  arrange(desc(n_na_train))   # <<--- ORDENAR DE MAYOR A MENOR
+
+# Mostrar tabla
+kable(
+  missing_table_f,
+  caption = "Cantidad y porcentaje de valores faltantes por variable en train y test",
+  align = "lrrrr"
+)
+
+```
+
+
+
+IMPUTAR BATHROOMS Y ROOMS CON MEDIANA POR TIPO DE PROPIEDAD
+```{r}
+train_final <- train_final %>%
+  group_by(property_type) %>%
+  mutate(
+    rooms = ifelse(is.na(rooms), median(rooms, na.rm = TRUE), rooms),
+    bathrooms = ifelse(is.na(bathrooms), median(bathrooms, na.rm = TRUE), bathrooms)
+  ) %>% ungroup()
+
+test_final <- test_final %>%
+  group_by(property_type) %>%
+  mutate(
+    rooms = ifelse(is.na(rooms), median(rooms, na.rm = TRUE), rooms),
+    bathrooms = ifelse(is.na(bathrooms), median(bathrooms, na.rm = TRUE), bathrooms)
+  ) %>% ungroup()
+
+```
+
+
+
+TITLE Y DESCRIPTION
+```{r}
+train_final$title[is.na(train_final$title)] <- ""
+train_final$description[is.na(train_final$description)] <- ""
+
+test_final$title[is.na(test_final$title)] <- ""
+test_final$description[is.na(test_final$description)] <- ""
+
+```
+
+
+
+
+
+```{r}
 # 5. Exportar
 output_dir <- here::here("data", "processed")
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
@@ -1908,39 +1984,10 @@ write.csv(test_final,  file.path(output_dir, "test_final.csv"),  row.names = FAL
 saveRDS(train_final, file.path(output_dir, "train_final.rds"))
 saveRDS(test_final,  file.path(output_dir, "test_final.rds"))
 
-
 ```
 
 
 
-```{r}
-library(dplyr)
-
-# Función para resumir faltantes
-missing_summary <- function(df) {
-  data.frame(
-    variable = names(df),
-    n_na = colSums(is.na(df)),
-    pct_na = round(colMeans(is.na(df))*100, 2)
-  ) %>% 
-    arrange(desc(pct_na))
-}
-
-# Resumen train
-missing_train <- missing_summary(train_final)
-missing_train
-
-# Resumen test
-missing_test <- missing_summary(test_final)
-missing_test
-
-```
-
-
-
-```{r}
-colnames(train_final)
-```
 
 
 
