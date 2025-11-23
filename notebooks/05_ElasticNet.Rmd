@@ -9,7 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-Cargar librerias
+#LIBRERIAS
 ```{r}
 # Instalar y cargar pacman (gestor de paquetes)
 knitr::opts_chunk$set(echo = TRUE)
@@ -185,7 +185,7 @@ if (!dir.exists(ruta_salida)) {
 # ======================================
 # 6. Construir submission final
 # ======================================
-submission <- tibble(
+submission1 <- tibble(
   property_id = test22$property_id,
   price = pred_price
 )
@@ -194,7 +194,7 @@ submission <- tibble(
 # 7. Guardar archivo final COMPLETO
 # ======================================
 write_csv(
-  submission,
+  submission1,
   paste0(ruta_salida, file_name)
 )
 
@@ -328,7 +328,7 @@ if (!dir.exists(ruta_salida)) {
 # ======================================
 # 6. Armar submission Kaggle
 # ======================================
-submission <- data.frame(
+submission2 <- data.frame(
   property_id = testEN$property_id,
   price = as.numeric(pred_en[, 1])
 )
@@ -337,7 +337,7 @@ submission <- data.frame(
 # 7. Guardar archivo en carpeta correcta
 # ======================================
 write.csv(
-  submission,
+  submission2,
   paste0(ruta_salida, file_name),
   row.names = FALSE
 )
@@ -444,7 +444,7 @@ pred_price <- exp(pred_log$.pred)
 pred_price <- round(pred_price)
 
 # Submission final
-submission <- data.frame(
+submission3 <- data.frame(
   property_id = testEN$property_id,
   price = pred_price
 )
@@ -503,7 +503,7 @@ file_name <- paste0(
 # ======================================================
 # 6. Guardar submission
 # ======================================================
-write.csv(submission, paste0(ruta_salida, file_name), row.names = FALSE)
+write.csv(submission3, paste0(ruta_salida, file_name), row.names = FALSE)
 
 # ======================================================
 # 7. Confirmación
@@ -614,7 +614,7 @@ pred_price <- round(pred_price)
 # ======================================================
 # 11. Crear submission Kaggle
 # ======================================================
-submission <- data.frame(
+submission4 <- data.frame(
   property_id = testEN$property_id,
   price = pred_price
 )
@@ -648,7 +648,7 @@ file_name <- paste0(
 )
 
 # Guardar
-write.csv(submission, paste0(ruta_salida, file_name), row.names = FALSE)
+write.csv(submission4, paste0(ruta_salida, file_name), row.names = FALSE)
 
 cat("Archivo guardado exitosamente en:\n")
 cat(paste0(ruta_salida, file_name), "\n")
@@ -886,5 +886,218 @@ summary(submission$price)
 
 ```
 
+# ELASTIC NET 6
 
+```{r}
+# ================================
+# 1. PREPARAR DATASETS BASE
+# ================================
+
+train_modelo_EN6 <- trainEN %>% 
+  select(-property_id, -title, -description, -city, -operation_type,
+         -has_pisos_vivienda, -has_cocina_integral, -has_salon_social, -barrio)
+
+test_modelo_EN6 <- testEN %>% 
+  select(-property_id, -title, -description, -city, -operation_type,
+         -has_pisos_vivienda, -has_cocina_integral, -has_salon_social, -barrio, -price)
+```
+
+
+
+```{r}
+# ============================================================
+#     ELASTIC NET + VALIDACIÓN CRUZADA ESPACIAL (CLUSTERING)
+# ============================================================
+
+library(sf)
+library(glmnet)
+library(dplyr)
+library(tibble)
+library(readr)
+
+set.seed(123)
+
+# ============================================================
+# 1. CREAR OBJETO ESPACIAL PARA CLUSTERING
+# ============================================================
+
+train_sf <- st_as_sf(
+  train_modelo_EN6,
+  coords = c("longitude", "latitude"),
+  crs = 4326
+)
+
+train_sf <- st_transform(train_sf, 3116)
+
+coords <- st_coordinates(train_sf)
+
+# ============================================================
+# 2. CLUSTERING ESPACIAL (REEMPLAZA blockCV)
+# ============================================================
+
+k <- 5
+km <- kmeans(coords, centers = k)
+
+train_sf$fold_id <- km$cluster
+
+folds <- vector("list", k)
+for (i in 1:k) {
+  folds[[i]] <- list(
+    train = which(train_sf$fold_id != i),
+    test  = which(train_sf$fold_id == i)
+  )
+}
+
+cat("===== Observaciones por Fold =====\n")
+print(table(train_sf$fold_id))
+
+# ============================================================
+# 3. MATRICES PARA GLMNET (ROBUSTAS: TRAIN & TEST IGUALES)
+# ============================================================
+
+# Fórmula SOLO CON PREDICTORES (sin price)
+preds <- colnames(train_modelo_EN6)[colnames(train_modelo_EN6) != "price"]
+form <- as.formula(paste("~", paste(preds, collapse = " + ")))
+
+# ---- TRAIN ----
+mf_train <- model.frame(form, data = train_modelo_EN6)
+X <- model.matrix(form, data = mf_train)
+y <- train_modelo_EN6$price
+
+# ---- TEST ----
+mf_test <- model.frame(form, data = test_modelo_EN6,
+                       xlev = lapply(mf_train, levels))
+
+X_test <- model.matrix(form, data = mf_test)
+
+# EMPAREJAR COLUMNAS ENTRE TRAIN Y TEST
+missing_cols <- setdiff(colnames(X), colnames(X_test))
+extra_cols   <- setdiff(colnames(X_test), colnames(X))
+
+# agregar columnas faltantes
+if (length(missing_cols) > 0) {
+  X_test <- cbind(
+    X_test,
+    matrix(0, nrow(X_test), length(missing_cols),
+           dimnames = list(NULL, missing_cols))
+  )
+}
+
+# quitar columnas extra
+if (length(extra_cols) > 0) {
+  X_test <- X_test[, colnames(X_test) %in% colnames(X)]
+}
+
+# reordenar columnas
+X_test <- X_test[, colnames(X)]
+
+# ============================================================
+# 4. FUNCIÓN MAE PARA VALIDACIÓN CRUZADA ESPACIAL
+# ============================================================
+
+MAE_lambda <- function(lambda_value) {
+  maes <- c()
+  
+  for (fold in folds) {
+    idx_train <- fold$train
+    idx_test  <- fold$test
+    
+    fit <- glmnet(
+      x = X[idx_train, ],
+      y = y[idx_train],
+      alpha = 0.5,
+      lambda = lambda_value,
+      standardize = TRUE
+    )
+    
+    pred <- predict(fit, newx = X[idx_test, ])
+    maes <- c(maes, mean(abs(pred - y[idx_test])))
+  }
+  
+  mean(maes)
+}
+
+# ============================================================
+# 5. BUSCAR EL MEJOR LAMBDA (SPATIAL CV)
+# ============================================================
+
+lambda_grid <- 10^seq(-3, 0, length.out = 30)
+
+mae_results <- sapply(lambda_grid, MAE_lambda)
+
+best_lambda <- lambda_grid[which.min(mae_results)]
+
+cat("\n==============================\n")
+cat("Mejor lambda:", best_lambda, "\n")
+cat("MAE:", min(mae_results), "\n")
+cat("==============================\n")
+
+# ============================================================
+# 6. ENTRENAMIENTO FINAL COMPLETO
+# ============================================================
+
+final_en <- glmnet(
+  x = X,
+  y = y,
+  alpha = 0.5,
+  lambda = best_lambda,
+  standardize = TRUE
+)
+
+# ============================================================
+# 7. PREDICCIÓN FINAL SOBRE TEST
+# ============================================================
+
+pred_test <- as.numeric(predict(final_en, newx = X_test))
+
+submission6 <- tibble(
+  property_id = testEN$property_id,
+  price = pred_test
+)
+
+```
+
+```{r}
+# ======================================================
+# GUARDAR SUBMISSION EN LA CARPETA DEL PROYECTO (V6)
+# ======================================================
+
+# Carpeta de salida
+ruta_salida <- "../outputs/kaggle_submissions/"
+
+# Asegurar que la carpeta exista
+if (!dir.exists(ruta_salida)) {
+    dir.create(ruta_salida, recursive = TRUE)
+}
+
+# =============================
+#  NOMBRE DEL ARCHIVO - V6
+# =============================
+
+# Convertir valores numéricos a formato para nombres de archivo
+lambda_str <- gsub("\\.", "_", best_lambda)
+mae_str    <- gsub("\\.", "_", format(round(min(mae_results), 4), scientific = FALSE))
+
+file_name <- paste0(
+  "ElasticNet_V6_SpatialCV_",
+  "lambda_", lambda_str,
+  "_alpha_0_5_",
+  "MAE_", mae_str,
+  ".csv"
+)
+
+# =============================
+#  GUARDAR ARCHIVO
+# =============================
+
+write.csv(
+    submission6,
+    paste0(ruta_salida, file_name),
+    row.names = FALSE
+)
+
+cat("Archivo guardado exitosamente en:\n")
+cat(paste0(ruta_salida, file_name), "\n")
+
+```
 
