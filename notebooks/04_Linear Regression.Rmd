@@ -2,7 +2,7 @@
 ### **Propósito:** REGRESION LINEAL.
 ```
 ---
-title: "04 - Model Training (7 Modelos)"
+title: "04 - Model Training "
 output: html_document
 ---
 
@@ -158,7 +158,7 @@ model_formula_multi <- as.formula(
 
 # Creamos la receta, aplicando log(price) correctamente
 rec_multi <- recipe(model_formula_multi, data = train_full) %>%
-  step_log(price, skip = TRUE) %>%                               # ⬅️ Transformación permitida
+  step_log(price, skip = TRUE) %>%                               
   step_other(localidad, threshold = 0.01) %>%
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
   step_zv(all_predictors())
