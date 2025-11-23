@@ -220,7 +220,7 @@ grafico_faltantes <- ggplot(faltantes_comp, aes(x = Variable, y = Porcentaje_NA,
 
 root_dir <- here::here()
 
-# Crea subrutas relativas al proyecto
+# Crea subcarpetas relativas al proyecto
 path_outputs <- file.path(root_dir, "outputs")
 path_figures <- file.path(path_outputs, "figures")
 
@@ -255,7 +255,7 @@ vars_outliers <- train %>%
   select(where(is.numeric)) %>%
   select(-any_of(c("price", "year", "lon", "lat", "month")))
 
-#⃣ Pasar a formato largo
+# Pasar a formato largo
 vars_long <- vars_outliers %>%
   pivot_longer(cols = everything(),
                names_to = "Variable",
@@ -731,6 +731,7 @@ m <- m +
 
 m
 
+
 #Directorio
 root_dir <- here::here()
 
@@ -979,9 +980,6 @@ cat("- estrato_df: ", nrow(estrato_df), " filas\n")
   test_sf_join  <- normalizar_estrato(test_sf_join)
 
 
-# Imputación por proximidad (solo faltantes reales)
-
-
 # Crear centroides de los lotes para representar cada polígono
 lotes_centroides <- sf::st_centroid(lotes_estrato_sf)
 coords_lotes <- sf::st_coordinates(lotes_centroides)
@@ -1036,6 +1034,7 @@ test_sf_final  <- test_sf_join
   readr::write_csv(test_ready_osm_estrato,  "outputs/test_final_con_estrato.csv")
 
 }
+
 
 ```
 
@@ -2331,11 +2330,6 @@ saveRDS(train_final, file.path(output_dir, "train_final.rds"))
 saveRDS(test_final,  file.path(output_dir, "test_final.rds"))
 
 ```
-
-
-
-
-
 
 
 ```{r}
