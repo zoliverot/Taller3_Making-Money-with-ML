@@ -86,7 +86,8 @@ library(tidymodels)
 library(glmnet)
 
 # --- Log del target ---
-train22 <- train22 %>% mutate(price_log = log(price))
+train22 <- trainEN %>% mutate(price_log = log(price))
+test22 <- testEN
 
 # --- Recipe final ---
 rec_en <- recipe(price_log ~ ., data = train22) %>%
@@ -123,30 +124,89 @@ pred_price <- exp(pred_log$.pred)
 # Redondear a entero ---
 pred_price <- round(pred_price)
 
-# --- Construir submission ---
-submission <- tibble(
-  property_id = test$property_id,
-  price = pred_price
-)
-
-# --- Guardar CSV para Kaggle ---
-timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
-
-file_name <- paste0(
-  "ElasticNet_final_lambda_1e-04_alpha_0.1111_", 
-  timestamp, ".csv"
-)
-
-write_csv(submission, file_name)
-
-cat("Archivo guardado correctamente como:\n", file_name, "\n")
-
 ```
 
 
+
+
+
+
+
+```{r}
+library(readr)
+library(dplyr)
+
+# ======================================
+# 1. Definir versión del modelo
+# ======================================
+version_model <- "v1_EN_final"
+
+# ======================================
+# 2. Parámetros usados en el modelo
+# ======================================
+lambda_best <- 1e-04       # penalty
+alpha_best  <- 0.1111111   # mixture
+
+# Convertir valores a cadenas limpias
+lambda_str <- gsub("\\.", "_", format(lambda_best, scientific = FALSE))
+alpha_str  <- gsub("\\.", "_", format(alpha_best, scientific = FALSE))
+
+# ======================================
+# 3. Calcular MAE interno del modelo (en escala original)
+# ======================================
+pred_train_log <- predict(fit_en, train22)
+pred_train_price <- exp(pred_train_log$.pred)
+MAE <- mean(abs(pred_train_price - train22$price))
+
+mae_str <- gsub("\\.", "_", format(round(MAE), scientific = FALSE))
+
+# ======================================
+# 4. Construir etiqueta de archivo FINAL
+# ======================================
+file_tag <- paste0(
+  "ElasticNet_", version_model,
+  "_lambda_", lambda_str,
+  "_alpha_", alpha_str,
+  "_MAE_", mae_str
+)
+
+file_name <- paste0(file_tag, ".csv")
+
+# ======================================
+# 5. Definir ruta final donde guardar
+# ======================================
+ruta_salida <- "../outputs/kaggle_submissions/"
+
+# Crear si no existe
+if (!dir.exists(ruta_salida)) {
+  dir.create(ruta_salida, recursive = TRUE)
+}
+
+# ======================================
+# 6. Construir submission final
+# ======================================
+submission <- tibble(
+  property_id = test22$property_id,
+  price = pred_price
+)
+
+# ======================================
+# 7. Guardar archivo final COMPLETO
+# ======================================
+write_csv(
+  submission,
+  paste0(ruta_salida, file_name)
+)
+
+# ======================================
+# 8. Mensaje final
+# ======================================
+cat("Archivo Kaggle generado exitosamente:\n")
+cat(" → ", paste0(ruta_salida, file_name), "\n")
+
+```
+
 # ELASTIC NET 2
-
-
 
 Definir variable objetivo
 ```{r}
@@ -407,7 +467,7 @@ MAE_real
 # ======================================================
 # 1. Versión del modelo
 # ======================================================
-version_model <- "v4_LOG"
+version_model <- "v3_LOG"
 
 # ======================================================
 # 2. Ruta donde guardar archivo
