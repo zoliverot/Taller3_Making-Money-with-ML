@@ -1,7 +1,7 @@
 ---
-### **Propósito:** evaluar modelos boosting
+### **Propósito:** crear modelos boosting
 ---
-title: "06 - Spatial Cross Validation"
+title: "06 - boosting"
 output: html_document
 ---
 
