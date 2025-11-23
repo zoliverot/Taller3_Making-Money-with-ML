@@ -1,11 +1,536 @@
 ---
-### **Propósito:** Evaluar cómo cambia el desempeño usando validación espacial.
+### **Propósito:** evaluar modelos boosting
 ---
 title: "06 - Spatial Cross Validation"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-source("../origen/config.R")
-source("../origen/modeling_utils.R")
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet
+)
+
+# Verificar paquetes cargados
+pacman::p_loaded()
 ```
+
+```{r}
+#Bases de datos 
+test_final <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/test_final.rds"))
+
+train_final <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/train_final.rds"))
+
+```
+
+## Transformaciones necesarias.
+
+```{r}
+# Convertir factores
+train_learner <- train_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+test_learner <- test_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+
+binary_vars <- c(
+  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
+  "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
+  "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito",
+  "has_estudio","has_remodelado","has_vista"
+)
+
+train_learner[binary_vars] <- lapply(train_learner[binary_vars], as.numeric)
+test_learner[binary_vars]  <- lapply(test_learner[binary_vars],  as.numeric)
+
+# Quitar columnas indeseadas
+vars_remove <- c("has_pisos_vivienda", "has_salon_social")
+
+train_learner <- train_learner %>% select(-all_of(vars_remove))
+test_learner  <- test_learner  %>% select(-all_of(vars_remove))
+
+# Buscar factores con un solo nivel en train
+single_train <- names(
+  Filter(
+    function(v) is.factor(train_learner[[v]]) &&
+      length(unique(train_learner[[v]])) == 1,
+    names(train_learner)
+  )
+)
+
+# Buscar factores con un solo nivel en test
+single_test <- names(
+  Filter(
+    function(v) is.factor(test_learner[[v]]) &&
+      length(unique(test_learner[[v]])) == 1,
+    names(test_learner)
+  )
+)
+
+```
+
+
+```{r}
+library(tidyverse)
+library(recipes)
+library(xgboost)
+library(Matrix)
+library(here)
+
+set.seed(123)
+
+
+# 1. VARIABLES CATEGÓRICAS
+
+
+factor_vars <- c("property_type", "month", "year", "localidad", "estrato")
+
+train_learner[factor_vars] <- lapply(train_learner[factor_vars], factor)
+test_learner[factor_vars]  <- lapply(test_learner[factor_vars],  factor)
+
+# Unificar niveles
+for (v in factor_vars) {
+  lvls <- union(levels(train_learner[[v]]), levels(test_learner[[v]]))
+  train_learner[[v]] <- factor(train_learner[[v]], levels = lvls)
+  test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
+}
+
+# ============================================================
+# 2. FORMULA
+# ============================================================
+
+sl <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    property_type + month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor +
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito +
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    localidad + estrato
+)
+
+# ============================================================
+# 3. RECETA CON INTERACCIONES
+# ============================================================
+
+rec <- recipe(sl, data = train_learner) %>%
+  
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  step_interact(
+    terms = ~ starts_with("year_") : dist_parques
+  ) %>%
+  
+  step_interact(
+    terms = ~ starts_with("property_type_") : (has_balcon + has_patio)
+  ) %>%
+  
+  step_zv(all_predictors(), skip = TRUE)
+
+prep_rec <- prep(rec)
+
+X_train <- bake(prep_rec, train_learner) %>% select(-price)
+y_train <- train_learner$price
+X_test  <- bake(prep_rec, test_learner)
+
+# ============================================================
+# 4. FIX: ALINEAR COLUMNAS ENTRE TRAIN Y TEST
+# ============================================================
+
+train_names <- colnames(X_train)
+test_names  <- colnames(X_test)
+
+missing_in_test <- setdiff(train_names, test_names)
+if (length(missing_in_test) > 0) {
+  X_test[missing_in_test] <- 0
+}
+
+missing_in_train <- setdiff(test_names, train_names)
+if (length(missing_in_train) > 0) {
+  X_train[missing_in_train] <- 0
+}
+
+# Orden idéntico
+X_train <- X_train[, train_names]
+X_test  <- X_test[, train_names]
+
+# ============================================================
+# 5. MATRICES XGBOOST
+# ============================================================
+
+dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+dtest  <- xgb.DMatrix(data = as.matrix(X_test))
+
+# ============================================================
+# 6. PARAMETROS XGBOOST (anti-sobreajuste)
+# ============================================================
+
+params <- list(
+  booster = "gbtree",
+  eta = 0.05,
+  max_depth = 6,
+  subsample = 0.7,
+  colsample_bytree = 0.7,
+  min_child_weight = 5,
+  lambda = 3,
+  objective = "reg:squarederror",
+  eval_metric = "mae"
+)
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 800,
+  early_stopping_rounds = 40,
+  watchlist = list(train = dtrain),
+  verbose = 1
+)
+
+# ============================================================
+# 7. PREDICCION FINAL
+# ============================================================
+
+test_pred <- predict(xgb_model, dtest)
+test_pred <- pmax(test_pred, 1)
+
+kaggle_output <- test_learner %>%
+  select(property_id) %>%
+  mutate(price = test_pred)
+
+write.csv(
+  kaggle_output,
+  here("outputs", "kaggle_submissions", "xgb_01.csv"),
+  row.names = FALSE
+)
+
+
+```
+
+
+
+
+```{r}
+# Versión 2
+
+set.seed(123)
+
+#  Agregar interacciones esenciales
+
+train_learner <- train_learner %>% mutate(
+  inter_year_parques = as.numeric(year) * dist_parques,
+  inter_tipo_balcon  = as.numeric(property_type == "Apartamento" & has_balcon == 1)
+)
+
+test_learner <- test_learner %>% mutate(
+  inter_year_parques = as.numeric(year) * dist_parques,
+  inter_tipo_balcon  = as.numeric(property_type == "Apartamento" & has_balcon == 1)
+)
+
+
+# Recipe para el modelo
+
+vars_modelo <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms",
+  "month", "year",
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor",
+  "has_gimnasio", "has_piscina", "has_bbq", "has_zona_infantil",
+  "has_balcon", "has_terraza", "has_patio", "has_jardin_exterior",
+  "has_chimenea", "has_cocina_integral", "has_deposito",
+  "has_estudio", "has_remodelado", "has_vista",
+  "dist_parques", "dist_colegios", "dist_restaurantes",
+  "dist_autopistas", "dist_centros_comerciales",
+  "estrato", "property_type",
+  "inter_year_parques", "inter_tipo_balcon"
+)
+
+train_tmp <- train_learner %>% select(all_of(c("price", vars_modelo)))
+test_tmp  <- test_learner  %>% select(all_of(vars_modelo))
+
+
+# Recipe
+receta_xgb_02 <- recipe(price ~ ., data = train_tmp) %>%
+
+  # Dummificar factores reales
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+
+  # Estandarizar numéricas importantes
+  step_normalize(surface_total, surface_covered,
+                 dist_parques, dist_centros_comerciales,
+                 inter_year_parques) %>%
+
+  # Remover columnas constantes
+  step_zv(all_predictors()) %>%
+
+  # Eliminar columnas con var casi nula (mucho ruido)
+  step_nzv(all_predictors())
+
+prep_receta_xgb_02 <- prep(receta_xgb_02)
+
+
+# 3. Construir matrices
+
+
+X_train <- bake(prep_receta_xgb_02, train_tmp) %>% select(-price)
+y_train <- train_tmp$price
+X_test  <- bake(prep_receta_xgb_02, test_tmp)
+
+# Convertir a DMatrix
+dtrain <- xgb.DMatrix(as.matrix(X_train), label = y_train)
+dtest  <- xgb.DMatrix(as.matrix(X_test))
+
+
+# Parámetros XGBoost Estables (anti-overfitting)
+
+
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eval_metric = "mae",
+  eta = 0.04,
+  max_depth = 4,
+  min_child_weight = 12,
+  subsample = 0.6,
+  colsample_bytree = 0.6,
+  lambda = 4,
+  alpha = 2
+)
+
+# 5. Entrenamiento con Early Stopping
+
+
+lista_matriz <- list(train = dtrain)
+
+xgb_model_02 <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 2000,
+  watchlist = watchlist,
+  early_stopping_rounds = 50,
+  print_every_n = 100
+)
+
+
+# Predicción final
+
+test_pred_xgb2 <- predict(xgb_model_02, dtest)
+test_pred_xgb2 <- pmax(test_pred_xgb2, 1)
+
+
+
+# Guardar
+
+xgb_02 <- test_learner %>%
+  select(property_id) %>%
+  mutate(price = round(test_pred_xgb2))
+
+write.csv(
+  submission,
+  here("outputs", "kaggle_submissions", "xgb_02.csv"),
+  row.names = FALSE
+)
+
+
+
+```
+
+
+
+```{r}
+
+#Versión 3 
+
+set.seed(123)
+
+vars_modelo <- c(
+  "price",
+  "surface_total", "surface_covered", "bedrooms", "bathrooms",
+  "property_type", "month", "year",
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor",
+  "has_gimnasio", "has_piscina", "has_bbq", "has_zona_infantil",
+  "has_balcon", "has_terraza", "has_patio", "has_jardin_exterior",
+  "has_chimenea", "has_cocina_integral", "has_deposito",
+  "has_estudio", "has_remodelado", "has_vista",
+  "dist_parques", "dist_colegios", "dist_restaurantes",
+  "dist_autopistas", "dist_centros_comerciales",
+  "estrato"
+)
+
+# Train y test SIN tocar price
+train_xgb_03 <- train_learner %>% select(any_of(vars_modelo))
+test_xgb_03 <- test_learner  %>% select(any_of(vars_modelo[-1]))   # sin price
+
+
+
+#  ASEGURAR TIPOS DE VARIABLES
+
+
+factor_vars <- c("property_type", "month", "year", "estrato")
+
+train_xgb_03[factor_vars] <- lapply(train_xgb_03[factor_vars], factor)
+test_xgb_03[factor_vars]  <- lapply(test_xgb_03[factor_vars],  factor)
+
+# Alinear niveles factor
+for (v in factor_vars) {
+  lvls <- union(levels(train_xgb_03[[v]]), levels(test_xgb_03[[v]]))
+  train_xgb_03[[v]] <- factor(train_xgb_03[[v]], levels = lvls)
+  test_xgb_03[[v]]  <- factor(test_xgb_03[[v]],  levels = lvls)
+}
+
+
+
+# 3. ELIMINAR FACTORES DE UN SOLO NIVEL
+
+
+single_level <- factor_vars[
+  sapply(factor_vars, function(v)
+    length(unique(c(as.character(train_xgb_03[[v]]),
+                    as.character(test_xgb_03[[v]])))) < 2)
+]
+
+if (length(single_level) > 0) {
+  message("Eliminando factores de 1 nivel: ", paste(single_level, collapse = ", "))
+  train_xgb_03 <- train_xgb_03 %>% select(-all_of(single_level))
+  test_xgb_03  <- test_xgb_03  %>% select(-all_of(single_level))
+}
+
+factor_vars <- setdiff(factor_vars, single_level)
+
+
+
+#  FÓRMULA (CON INTERACCIÓN year × dist_parques)
+
+
+xgb_formula_03 <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    property_type + month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor +
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito +
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    estrato +
+    year:dist_parques
+)
+
+
+
+#MODEL.MATRIX — NO ROMPER LA FÓRMULA 
+
+X_train_raw <- model.matrix(xgb_formula_03, data = train_xgb_03)
+y_train <- train_xgb$price
+
+
+X_test_raw <- model.matrix(
+  delete.response(terms(xgb_formula_03)),
+  data = test_xgb_03
+)
+
+
+# Quitar intercepto
+X_train <- X_train_raw[, colnames(X_train_raw) != "(Intercept)", drop = FALSE]
+X_test  <- X_test_raw[,  colnames(X_train_raw) != "(Intercept)", drop = FALSE]
+
+
+
+#  ALINEAR COLUMNAS ENTRE TRAIN Y TEST
+
+train_cols <- colnames(X_train)
+test_cols  <- colnames(X_test)
+
+# Agregar columnas faltantes en test
+faltantes <- setdiff(train_cols, test_cols)
+if (length(faltantes) > 0) {
+  X_test[, faltantes] <- 0
+}
+
+# Quitar columnas extra en test
+extra <- setdiff(test_cols, train_cols)
+if (length(extra) > 0) {
+  X_test <- X_test[, !(colnames(X_test) %in% extra), drop = FALSE]
+}
+
+# Reordenamos igual que train
+X_test <- X_test[, train_cols, drop = FALSE]
+
+
+cat("dim(X_train): ", dim(X_train), "\n")
+cat("dim(X_test):  ", dim(X_test),  "\n")
+
+
+#  DMATRIX PARA XGBoost
+
+
+dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+dtest  <- xgb.DMatrix(data = as.matrix(X_test))
+
+
+# Parámetros estables
+ 
+
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eval_metric = "mae",
+  eta = 0.05,
+  max_depth = 5,
+  min_child_weight = 8,
+  subsample = 0.7,
+  colsample_bytree = 0.7,
+  lambda = 4
+)
+
+xgb_model_03 <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 1500,
+  watchlist = list(train = dtrain),
+  early_stopping_rounds = 50,
+  print_every_n = 100
+)
+
+
+
+# 9. Predicciones
+
+test_pred_xgb_03 <- predict(xgb_model_03, dtest)
+test_pred_xgb_03 <- pmax(test_pred_xgb_03, 1)   # evitar negativos
+
+
+
+# Guardar y subir a kaggle
+
+
+xgb_03 <- test_learner %>%
+  mutate(price = round(test_pred)) %>%
+  select(property_id, price)
+
+write.csv(
+  xgb_03,
+  here("outputs", "kaggle_submissions", "xgb_03.csv"),
+  row.names = FALSE
+)
+
+```
+

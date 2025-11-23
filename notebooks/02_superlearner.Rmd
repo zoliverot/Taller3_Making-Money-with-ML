@@ -760,6 +760,34 @@ Creación de una receta que:
 
 
 ```{r}
+
+
+
+# Conversión de Tipos de Datos -
+binary_vars <- train_learner %>%
+  select(starts_with("has_")) %>%
+  names()
+
+train_learner <- train_learner %>% mutate(across(all_of(binary_vars), as.numeric))
+test_learner  <- test_learner  %>% mutate(across(all_of(binary_vars), as.numeric))
+
+categorical_vars <- c("month", "year", "property_type", "estrato", "localidad") # 'localidad' ES UNA FEATURE
+train_learner <- train_learner %>% mutate(across(all_of(categorical_vars), as.factor))
+test_learner  <- test_learner  %>% mutate(across(all_of(categorical_vars), as.factor))
+
+# Unificar Niveles de Factores
+
+for (v in categorical_vars) {
+  # Tomamos todos los niveles de train y test
+  all_levels <- union(levels(train_learner[[v]]), levels(test_learner[[v]]))
+  
+  # Reaplicamos los factores con el conjunto completo de niveles
+  train_learner[[v]] <- factor(train_learner[[v]], levels = all_levels)
+  test_learner[[v]]  <- factor(test_learner[[v]],  levels = all_levels)
+}
+
+
+
 # La fórmula ahora incluye 'localidad' como una variable predictora clave.
 model_formula_05 <- as.formula(
   price ~
@@ -788,7 +816,7 @@ rec_sl_05 <- recipe(model_formula_05, data = train_learner) %>%
 
 # Entrenamos la receta
 
-prep_rec <- prep(rec, training = train_learner)
+prep_rec <- prep(rec_sl_05, training = train_learner)
 
 
 # Aplicamos la receta para crear las matrices finales
@@ -860,142 +888,209 @@ boxplot(submission_chapinero$price,
 ```
 
 
+## Superlearner GLMNet - Ranger - XGboost
+
+Limpia outliers, elimina geometría sf y prepara la variable objetivo como log_price.
+
+Convierte amenidades has_* a numéricas y alinea todas las variables categóricas entre train y test.
+
+Selecciona predictores informativos (numéricos, amenidades filtradas y categorías).
+
+Preprocesa con recipes (log-transform, dummies, limpieza, centrado y escalado) y construye matrices alineadas.
+
+Entrena un SuperLearner (GLMNet + Ranger + XGBoost), predice en test y genera el archivo de submission.
+
 
 ```{r}
 
-### VRESION 2 
+### VERSION 2
 
-#  Limpieza de Outliers en Precio (solo en Train) 
-# Esto estabiliza el entrenamiento del modelo
+#--- Limpieza de Outliers en Precio (solo en Train) ---
+
 q_low  <- quantile(train_final$price, 0.01, na.rm = TRUE)
 q_high <- quantile(train_final$price, 0.99, na.rm = TRUE)
+
 train_learner2 <- train_final %>%
   filter(price >= q_low & price <= q_high)
-test_learner2 <- test_final # No filtramos el test set
 
-# CREAR LA VARIABLE OBJETIVO CORRECTA: log(price) 
-train_learner2 <- train_learner2 %>% mutate(log_price = log1p(price))
+test_learner2 <- test_final
 
+# Extraer coordenadas si vienen de objetos sf
+if ("sf" %in% class(train_learner2)) {
+  train_learner2 <- train_learner2 %>%
+    mutate(
+      longitude = st_coordinates(.)[,1],
+      latitude  = st_coordinates(.)[,2]
+    ) %>% 
+    st_drop_geometry()
+}
 
-# Variables numéricas clave
+if ("sf" %in% class(test_learner2)) {
+  test_learner2 <- test_learner2 %>%
+    mutate(
+      longitude = st_coordinates(.)[,1],
+      latitude  = st_coordinates(.)[,2]
+    ) %>%
+    st_drop_geometry()
+}
+
+# Crear la variable objetivo log(price)
+train_learner2 <- train_learner2 %>%
+  mutate(log_price = log1p(price))
+
+#--- Conversión de variables has_* a numéricas ---
+
+binary_vars <- grep("^has_", names(train_learner2), value = TRUE)
+
+train_learner2 <- train_learner2 %>%
+  mutate(across(all_of(binary_vars), ~ as.numeric(as.character(.))))
+
+test_learner2 <- test_learner2 %>%
+  mutate(across(all_of(binary_vars), ~ as.numeric(as.character(.))))
+
+#--- Conversión de variables categóricas ---
+
+categorical_vars <- c("month", "year", "property_type", "estrato", "localidad")
+
+train_learner2 <- train_learner2 %>% mutate(across(all_of(categorical_vars), as.factor))
+test_learner2  <- test_learner2  %>% mutate(across(all_of(categorical_vars), as.factor))
+
+# Unificar niveles
+for (v in categorical_vars) {
+  lvls <- union(levels(train_learner2[[v]]), levels(test_learner2[[v]]))
+  train_learner2[[v]] <- factor(train_learner2[[v]], levels = lvls)
+  test_learner2[[v]]  <- factor(test_learner2[[v]],  levels = lvls)
+}
+
+#--- Selección de variables numéricas ---
+
 features_numericas <- c(
-  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
-  "latitude", "longitude", "dist_parques", "dist_colegios", "dist_restaurantes"
+  "surface_total", "surface_covered",
+  "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude",
+  "dist_parques", "dist_colegios", "dist_restaurantes"
 )
 
-# Dummies de texto más informativas (aquellas con una frecuencia entre 5% y 95%)
-# Esto elimina las que son demasiado raras o demasiado comunes
+#--- Selección de dummies informativas ---
+
 dummy_info <- train_learner2 %>%
-  select(starts_with("has_")) %>%
-  summarise(across(everything(), mean)) %>%
+  select(all_of(binary_vars)) %>%
+  summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
   pivot_longer(everything(), names_to = "feature", values_to = "frequency") %>%
   filter(frequency > 0.05 & frequency < 0.95)
 
 features_dummies <- dummy_info$feature
 
-# Variables categóricas
+#--- Variables categóricas para el modelo ---
+
 features_categoricas <- c("property_type", "localidad")
 
-# Conjunto final de predictores
+#--- Conjunto final de predictores ---
+
 all_features <- c(features_numericas, features_dummies, features_categoricas)
 
-# Filtramos los dataframes para quedarnos solo con las variables que usaremos
-train_learner2 <- train_learner2 %>% select(all_of(all_features), property_id, log_price)
-test_learner2  <- test_learner2  %>% select(all_of(all_features), property_id)
+train_learner2 <- train_learner2 %>%
+  select(all_of(all_features), property_id, log_price)
 
+test_learner2 <- test_learner2 %>%
+  select(all_of(all_features), property_id)
 
-# Definición de la receta de preprocesamiento mejorada 
+#--- Unificar niveles nuevamente (recomendado después de filtrar columnas) ---
 
-# Unificar niveles de factores antes de la receta
 for (v in features_categoricas) {
-  lvls <- union(levels(as.factor(train_learner2[[v]])), levels(as.factor(test_learner2[[v]])))
+  lvls <- union(levels(train_learner2[[v]]), levels(test_learner2[[v]]))
   train_learner2[[v]] <- factor(train_learner2[[v]], levels = lvls)
-  test_learner2[[v]]  <- factor(test_learner2[[v]],  levels = lvls)
+  test_learner2[[v]]  <- factor(test_learner2[[v]], levels = lvls)
 }
 
-# La fórmula ahora se construye dinámicamente
-model_formula <- as.formula(paste("log_price ~", paste(all_features, collapse = " + ")))
+#--- Receta de preprocesamiento ---
 
-# Creamos una receta de preprocesamiento más potente
+model_formula <- as.formula(
+  paste("log_price ~", paste(all_features, collapse = " + "))
+)
+
 rec <- recipe(model_formula, data = train_learner2) %>%
-  # Tratar variables numéricas sesgadas aplicándoles logaritmo
-  step_log(all_of(c("surface_total", "surface_covered", "dist_parques", "dist_colegios", "dist_restaurantes")), offset = 1) %>%
-  # Agrupar localidades poco frecuentes
+  step_log(
+    c(surface_total, surface_covered, dist_parques, dist_colegios, dist_restaurantes),
+    offset = 1
+  ) %>%
   step_other(localidad, threshold = 0.02, other = "otra_localidad") %>%
-  # Manejar categorías nuevas que puedan aparecer en test
   step_novel(all_nominal_predictors()) %>%
-  # Convertir todas las variables categóricas a dummies
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
-  # Eliminar variables con varianza cero
   step_zv(all_predictors()) %>%
-  # Centrar y escalar
   step_center(all_numeric_predictors()) %>%
   step_scale(all_numeric_predictors())
 
-# Entrenamos la receta
-
 prep_rec <- prep(rec, training = train_learner2)
 
-# Aplicamos la receta para crear las matrices finales
 X_train <- bake(prep_rec, new_data = train_learner2) %>% select(-log_price)
-y_train <- bake(prep_rec, new_data = train_learner2) %>% pull(log_price) # <-- AHORA 'y_train' ES log_price
+y_train <- bake(prep_rec, new_data = train_learner2) %>% pull(log_price)
 X_test  <- bake(prep_rec, new_data = test_learner2)
 
-# Alinear columnas finales
+# Alinear columnas
 common_cols <- intersect(colnames(X_train), colnames(X_test))
 X_train <- X_train[, common_cols]
 X_test  <- X_test[, common_cols]
 
+#--- Modelos base ---
 
-# Modelos base con hiperparámetros ligeramente más potentes
-SL.ranger.tuned <- function(...) SL.ranger(..., num.trees = 750, mtry = floor(ncol(X_train) / 3), min.node.size = 5)
-SL.xgboost.tuned <- function(...) SL.xgboost(..., nrounds = 1000, max_depth = 5, eta = 0.03, subsample = 0.8, colsample_bytree = 0.8)
+SL.ranger.tuned <- function(...) SL.ranger(...,
+    num.trees = 750,
+    mtry = floor(ncol(X_train) / 3),
+    min.node.size = 5
+)
+
+SL.xgboost.tuned <- function(...) SL.xgboost(...,
+    nrounds = 1000,
+    max_depth = 5,
+    eta = 0.03,
+    subsample = 0.8,
+    colsample_bytree = 0.8
+)
+
 learner_library <- c("SL.glmnet", "SL.ranger.tuned", "SL.xgboost.tuned")
 
 set.seed(1234)
 cv_control <- SuperLearner.CV.control(V = 5)
 
+na_ratio <- colMeans(is.na(X_train))
+
+cols_to_drop <- names(na_ratio[na_ratio > 0.4])
+
+X_train <- X_train %>% select(-all_of(cols_to_drop))
+X_test  <- X_test  %>% select(-all_of(cols_to_drop))
+
+print(cols_to_drop)
+
 
 sl_fit <- SuperLearner(
-  Y = y_train, X = as.data.frame(X_train),
-  SL.library = learner_library, method = "method.NNLS",
-  family = gaussian(), cvControl = cv_control
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = learner_library,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_control
 )
 
-print(sl_fit)
-
-# Realizamos la predicción (el resultado estará en escala logarítmica)
-log_predictions <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
-
-# ¡PASO CLAVE! Convertimos las predicciones a la escala de precios original
+log_predictions <- predict(sl_fit, as.data.frame(X_test))$pred
 precios_finales <- expm1(log_predictions)
 
-# Creamos el dataframe de submission
 submission <- tibble(
   property_id = test_learner2$property_id,
-  price = round(precios_finales, 0) # El '0' significa redondear a 0 decimales
+  price = round(precios_finales)
 )
 
-# Guardamos el archivo
 ruta_destino <- here::here("outputs", "kaggle_submissions")
 dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
-ruta_archivo_submission <- here::here(ruta_destino, "submission_superlearner_improved.csv")
-# Convertir matriz a vector
-submission$price <- as.vector(submission$price)
 
-write_csv(submission, ruta_archivo_submission)
-
-
-# --- Verificación de las Predicciones ---
+write_csv(
+  submission,
+  here::here(ruta_destino, "submission_superlearner_improved.csv")
+)
 
 summary(submission$price / 1e6)
 
-# Ver un resumen de las predicciones solo para Chapinero
-submission_chapinero <- submission %>%
-  inner_join(test_final %>% select(property_id, localidad), by = "property_id") %>%
-  filter(localidad == "Localidad Chapinero")
 
-summary(submission_chapinero$price / 1e6)
 
 ```
 

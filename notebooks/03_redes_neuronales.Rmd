@@ -1,0 +1,302 @@
+---
+title: "redes_neuronales"
+author: "Vivian Cabanzo"
+date: "2025-11-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet, tensorflow, reticulate, keras
+)
+
+# Verificar paquetes cargados
+pacman::p_loaded()
+
+
+
+
+```
+
+## Bases de datos
+
+```{r}
+#bases de datos
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_final  <- readRDS(here::here("data", "processed", "test_final.rds"))
+
+```
+
+
+
+```{r}
+
+
+# Usar el mismo tf 
+tf$constant("ok")
+
+# Intentar obtener keras desde tensorflow
+keras <- import("keras")
+
+# Filtrar variables NO deseadas
+   
+
+vars_remove <- c("has_pisos_vivienda", "has_salon_social", "has_cocina_integral")
+
+train_filtrado <- train_final %>%
+  select(-all_of(vars_remove))
+
+test_filtrado  <- test_final %>%
+  select(-all_of(vars_remove))
+
+
+#  Definir fórmula del modelo (sin interacciones)
+
+nn <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    longitude + latitude +
+    estrato  + month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + 
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_deposito + has_estudio + 
+    has_remodelado + has_vista
+)
+
+
+# Asegurar tipos de las variables categóricas 
+#    que vamos a tratar como embeddings
+
+
+categoricas_embed <- c( "estrato", "month", "year")
+
+train_filtrado <- train_filtrado %>%
+  mutate(across(all_of(categoricas_embed), as.factor))
+
+test_filtrado <- test_filtrado %>%
+  mutate(across(all_of(categoricas_embed), as.factor))
+
+
+# Receta de preprocesamiento
+#    - NO hacemos dummies de las categóricas de embedding
+#    - Sí hacemos dummies de otras categóricas (si hay)
+#    - Normalizamos numéricas
+
+
+receta_nn <- recipe(nn, data = train_filtrado) %>%
+  
+  # manejar niveles nuevos en embed-categóricas
+  step_novel(all_of(categoricas_embed)) %>%
+  
+  # crear dummies SOLO para nominales que NO son embeddings
+  step_dummy(all_nominal_predictors(), one_hot = TRUE, -all_of(categoricas_embed)) %>%
+  
+  # eliminar columnas sin varianza
+  step_zv(all_predictors()) %>%
+  
+  # normalizar numéricas (pero las embed seguirán siendo factor, así que no se tocan)
+  step_normalize(all_numeric_predictors())
+
+prep_nn <- prep(receta_nn, training = train_filtrado, retain = TRUE)
+
+
+#  Aplicar receta a train y test
+
+
+train_proc <- bake(prep_nn, new_data = train_filtrado)
+test_proc  <- bake(prep_nn, new_data = test_filtrado)
+
+# transformar price a log (objetivo)
+y_train <- log1p(train_proc$price)
+
+# matrices de predictores
+X_train <- train_proc %>% select(-price)
+X_test  <- test_proc
+
+# por si acaso se coló una columna 'price' en test (no debería)
+if ("price" %in% names(X_test)) {
+  X_test <- X_test %>% select(-price)
+}
+
+
+#  Separar numéricas y categóricas (embedding)
+# Asegurar que columnas de embedding siguen existiendo
+embed_cols <- categoricas_embed
+
+missing_embed <- setdiff(embed_cols, colnames(X_train))
+if (length(missing_embed) > 0) {
+  stop("Faltan en X_train las columnas de embedding: ", paste(missing_embed, collapse = ", "))
+}
+
+# Convertir factores a índices enteros
+for (col in embed_cols) {
+  X_train[[col]] <- as.integer(as.factor(X_train[[col]]))
+  X_test[[col]]  <- as.integer(as.factor(X_test[[col]]))
+}
+
+# columnas numéricas (ya normalizadas)
+num_cols <- setdiff(colnames(X_train), embed_cols)
+
+X_train_num <- as.matrix(X_train %>% select(all_of(num_cols)))
+X_test_num  <- as.matrix(X_test  %>% select(all_of(num_cols)))
+
+storage.mode(X_train_num) <- "double"
+storage.mode(X_test_num)  <- "double"
+
+y_train_vec <- as.numeric(y_train)
+
+# talles de cada categórica para embeddings
+
+n_estrato   <- length(unique(X_train$estrato))
+n_month     <- length(unique(X_train$month))
+n_year      <- length(unique(X_train$year))
+
+
+# Definir el modelo con EMBEDDINGS (vía keras Python)
+
+# Helper para shape como tupla Python
+tuple <- reticulate::tuple
+
+inp_num      <- keras$Input(shape = tuple(as.integer(ncol(X_train_num))), name = "numericas")
+inp_estrato  <- keras$Input(shape = tuple(1L), name = "estrato")
+inp_month    <- keras$Input(shape = tuple(1L), name = "month")
+inp_year     <- keras$Input(shape = tuple(1L), name = "year")
+
+# Embeddings
+
+
+emb_estrato <- keras$layers$Embedding(
+  input_dim = as.integer(n_estrato + 1),
+  output_dim = as.integer(3),
+  name = "emb_estrato"
+)(inp_estrato)
+emb_estrato <- keras$layers$Flatten()(emb_estrato)
+
+emb_month <- keras$layers$Embedding(
+  input_dim = as.integer(n_month + 1),
+  output_dim = as.integer(2),
+  name = "emb_month"
+)(inp_month)
+emb_month <- keras$layers$Flatten()(emb_month)
+
+emb_year <- keras$layers$Embedding(
+  input_dim = as.integer(n_year + 1),
+  output_dim = as.integer(2),
+  name = "emb_year"
+)(inp_year)
+emb_year <- keras$layers$Flatten()(emb_year)
+
+
+
+# Concatenar numéricas + embeddings
+all_features <- keras$layers$Concatenate()(
+  list(inp_num, emb_estrato, emb_month, emb_year)
+)
+
+
+hidden <- keras$layers$Dense(
+  units = as.integer(128),
+  activation = "relu"
+)(all_features)
+
+hidden <- keras$layers$Dropout(rate = 0.25)(hidden)
+
+hidden <- keras$layers$Dense(
+  units = as.integer(64),
+  activation = "relu"
+)(hidden)
+
+hidden <- keras$layers$Dropout(rate = 0.10)(hidden)
+
+
+
+
+output <- keras$layers$Dense(
+    units = as.integer(1),
+    name = "price_log"
+)(hidden)
+
+
+# Definir modelo
+modelo_keras <- keras$Model(
+  inputs = list(
+    numericas = inp_num,
+    estrato   = inp_estrato,
+    month     = inp_month,
+    year      = inp_year
+  ),
+  outputs = output
+)
+
+# Compilar usando MAE
+modelo_keras$compile(
+  loss = "mae",
+  optimizer = keras$optimizers$Adam(learning_rate = 0.001),
+  metrics = list("mae")
+)
+
+modelo_keras$summary()
+
+
+#  Entrenamiento
+history_nn <- modelo_keras$fit(
+  x = list(
+    numericas = X_train_num,
+    estrato   = matrix(as.integer(X_train$estrato),   ncol = 1),
+    month     = matrix(as.integer(X_train$month),     ncol = 1),
+    year      = matrix(as.integer(X_train$year),      ncol = 1)
+  ),
+  y = matrix(y_train_vec, ncol = 1),
+  epochs = as.integer(50),
+  batch_size = as.integer(64),
+  validation_split = 0.2
+)
+
+
+# Predicciones en test y volver a escala original
+
+pred_log <- modelo_keras$predict(
+  list(
+    numericas = X_test_num,
+    estrato   = matrix(as.integer(X_test$estrato),   ncol = 1),
+    month     = matrix(as.integer(X_test$month),     ncol = 1),
+    year      = matrix(as.integer(X_test$year),      ncol = 1)
+  )
+)
+
+
+pred_nn <- as.numeric(pred_log)
+pred_nn <- expm1(pred_nn)           # volver del log
+pred_nn <- pmax(pred_nn, 1)         # evitar negativos / cero
+
+
+# Guardar
+
+
+output_nn <- test_final %>%
+  select(property_id) %>%
+  mutate(price = pred_nn)
+
+
+
+write.csv(
+  output_nn,
+  here("outputs", "kaggle_submissions", "nn_02.csv"),
+  row.names = FALSE
+)
+
+
+```
+
+
+
+
