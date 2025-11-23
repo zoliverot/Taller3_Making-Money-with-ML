@@ -507,7 +507,7 @@ test_apto[common]  <- lapply(test_apto[common],  as.numeric)
 
 #  FÓRMULA
 
-sl_02 <- as.formula(
+sl_02_espacial <- as.formula(
   price ~ 
     surface_total + surface_covered + bedrooms + bathrooms +
     month + year +
@@ -526,7 +526,7 @@ sl_02 <- as.formula(
 # 5. RECETA
 
 
-receta_02 <- recipe(sl_02, data = train_apto) %>%
+receta_02_espacial <- recipe(sl_02_espacial, data = train_apto) %>%
   
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
   
@@ -536,12 +536,12 @@ receta_02 <- recipe(sl_02, data = train_apto) %>%
   
   step_zv(all_predictors())
 
-prep_receta_02 <- prep(receta_02, training = train_apto, retain = TRUE)
+prep_receta_02_espacial <- prep(receta_02_espacial, training = train_apto, retain = TRUE)
 
 # Matrices finales
-X_train <- bake(prep_receta_02, new_data = train_apto) %>% select(-price)
+X_train <- bake(prep_receta_02_espacial, new_data = train_apto) %>% select(-price)
 y_train <- train_apto$price
-X_test  <- bake(prep_receta_02, new_data = test_apto)
+X_test  <- bake(prep_receta_02_espacial, new_data = test_apto)
 
 
 
@@ -562,14 +562,14 @@ cv_control <- list(
 )
 
 # Librerías base
-mix <- c(
+mix_espacial <- c(
   "SL.lm",
   "SL.ranger",
   "SL.mean"
 )
 
 # Entrenar SuperLearner con CV espacial
-sl_02 <- SuperLearner(
+sl_02_espacial <- SuperLearner(
   Y = y_train,
   X = as.data.frame(X_train),
   SL.library = mix,
@@ -582,15 +582,15 @@ sl_02 <- SuperLearner(
 
 #  PREDECIR EN TEST Y EXPORTAR
 
-test_02 <- predict(sl_02, newdata = as.data.frame(X_test))$pred
-test_02 <- pmax(test_02, 1)
+test_02_espacial <- predict(sl_02_espacial, newdata = as.data.frame(X_test))$pred
+test_02_espacial <- pmax(test_02_espacial, 1)
 
-output_02 <- test_apto %>%
+output_02_espacial <- test_apto %>%
   select(property_id) %>%
-  mutate(price = test_02)
+  mutate(price = test_02_espacial)
 
 write.csv(
-  output_02,
+  output_02_espacial,
   here("outputs", "kaggle_submissions", "sl_ranger_lm_espacial.csv"),
   row.names = FALSE
 )
@@ -599,39 +599,20 @@ write.csv(
 ## Comparación entre versión 1 y 2 de superlearner lm - random forest
 ```{r}
 # MAE del SuperLearner bajo CV ESPACIAL
-mae_sl_espacial <- mean(abs(sl_02$SL.predict - y_train))
+mae_sl_espacial <- mean(abs(sl_02_espacial$SL.predict - y_train))
 mae_sl_espacial
 
 
 # MAE del superlearner con CV normal
-set.seed(123)
+mae_sl_02 <- mean(abs(sl_02$SL.predict - y_train))
+mae_sl_02
 
-N <- nrow(train_apto)
-K <- 5
 
-fold_indices_random <- split(sample(1:N), rep(1:K, length.out = N))
-
-cv_random <- list(
-  V = K,
-  validRows = fold_indices_random
-)
-
-sl_random <- SuperLearner(
-  Y = y_train,
-  X = as.data.frame(X_train),
-  SL.library = mix,
-  method = "method.NNLS",
-  family = gaussian(),
-  cvControl = cv_random
-)
-
-mae_sl_random <- mean(abs(sl_02$SL.predict - y_train))
-mae_sl_random
 
 
 comparativo_sl_02 <- tibble(
   Modelo = c("SuperLearner CV normal", "SuperLearner CV espacial"),
-  MAE = c(mae_sl_normal, mae_sl_espacial)
+  MAE = c(mae_sl_02, mae_sl_espacial)
 )
 
 comparativo_sl_02
