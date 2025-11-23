@@ -27,7 +27,7 @@ El trabajo cubre todo el ciclo analítico:
 |-------------------------|-----------------------------------------------|
 | `data/`                 | Datos crudos, procesados y externos          |
 | `notebooks/`            | Notebooks `.Rmd` (01 a 07)                   |
-| `origen/`               | Funciones R (config, modelado, visualización)|
+| `origen/`               | Funciones R (config, modelado)               |
 | `outputs/`              | Resultados (gráficos, tablas, predicciones) |
 | `reports/`              | Informe y presentación final                 |
 | `references/`           | Bibliografía y artículos                     |
