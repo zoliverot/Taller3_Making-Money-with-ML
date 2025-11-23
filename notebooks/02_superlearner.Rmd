@@ -1,0 +1,1004 @@
+---
+### **Propósito:** Crear superlearner.
+```
+---
+title: "02 - Superlearner "
+output: html_document
+---
+
+```{r}
+source("../origen/config.R")
+source("../origen/data_utils.R")
+```
+
+##Librerías
+
+```{r setup, include=FALSE}
+
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet
+)
+
+# Verificar paquetes cargados
+pacman::p_loaded()
+
+
+here::i_am("notebooks/02_superlearner.rmd")
+
+```
+
+
+
+```{r}
+
+#Bases de datos 
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_final  <- readRDS(here::here("data", "processed", "test_final.rds"))
+
+
+
+
+```
+
+
+
+```{r}
+# Convertir factores
+train_learner <- train_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+test_learner <- test_final %>%
+  mutate(
+    month     = as.factor(month),
+    year      = as.factor(year),
+    localidad = as.factor(localidad),
+    estrato   = as.factor(estrato)
+  )
+
+
+binary_vars <- c(
+  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
+  "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
+  "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito",
+  "has_estudio","has_remodelado","has_vista"
+)
+
+train_learner[binary_vars] <- lapply(train_learner[binary_vars], as.numeric)
+test_learner[binary_vars]  <- lapply(test_learner[binary_vars],  as.numeric)
+
+# Quitar columnas indeseadas
+vars_remove <- c("has_pisos_vivienda", "has_salon_social")
+
+train_learner <- train_learner %>% select(-all_of(vars_remove))
+test_learner  <- test_learner  %>% select(-all_of(vars_remove))
+
+# Buscar factores con un solo nivel en train
+single_train <- names(
+  Filter(
+    function(v) is.factor(train_learner[[v]]) &&
+      length(unique(train_learner[[v]])) == 1,
+    names(train_learner)
+  )
+)
+
+# Buscar factores con un solo nivel en test
+single_test <- names(
+  Filter(
+    function(v) is.factor(test_learner[[v]]) &&
+      length(unique(test_learner[[v]])) == 1,
+    names(test_learner)
+  )
+)
+
+
+```
+
+
+## Superlearner GLMnet - ranger - Xgboost
+
+- Unificación de niveles de factores entre train y test.
+
+- Recetas con creación de dummies y eliminación de variables redundantes.
+
+- Construcción automática de interacciones entre dummies de año, tipo de propiedad, amenidades y distancias.
+
+-Generación de matrices finales alineadas para modelado.
+
+- Definición de validación cruzada con 10 folds.
+
+- Entrenamiento de un SuperLearner con modelos regularizados (GLMNet, Ranger y XGBoost).
+
+- Predicción final sobre el conjunto de prueba y exportación del archivo.
+```{r}
+
+#semilla
+
+set.seed(123)
+
+
+#  Fórmula SIN interacciones (recipes las crea)
+
+sl_01 <- as.formula(
+  price ~ 
+    surface_total + surface_covered  + bedrooms + bathrooms +
+    property_type  + month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + has_gimnasio + has_piscina +
+    has_bbq  + has_zona_infantil + has_balcon + has_terraza +
+    has_patio + has_jardin_exterior + has_chimenea + has_cocina_integral +
+    has_deposito + has_estudio + has_remodelado + has_vista  +
+    dist_parques + dist_colegios + dist_restaurantes + 
+    dist_autopistas + dist_centros_comerciales +
+    localidad + estrato
+)
+
+#  Unificar niveles de factores
+
+
+for (v in names(train_learner)) {
+  if (is.factor(train_learner[[v]])) {
+    lvls <- union(levels(train_learner[[v]]), levels(test_learner[[v]]))
+    train_learner[[v]] <- factor(train_learner[[v]], levels = lvls)
+    test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
+  }
+}
+
+# receta básica sin interacciones
+
+rec_base <- recipe(sl_01, data = train_learner) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_zv(all_predictors())
+
+prep_base <- prep(rec_base)
+
+
+# Identificar dummies para interacciones
+
+
+train_dummy_names <- bake(prep_base, train_learner) %>% names()
+
+year_dums <- grep("^year_", train_dummy_names, value = TRUE)
+ptype_dums <- grep("^property_type_", train_dummy_names, value = TRUE)
+
+# Amenidades
+amenities <- c("has_seguridad","has_balcon","has_piscina","has_gimnasio")
+
+
+# RECETA FINAL con interacciones dinámicas y correctas
+
+
+receta_01 <- recipe(sl, data = train_learner) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_interact(
+    terms = as.formula(
+      paste0("~ (", paste(year_dums, collapse = "+"), 
+             ") : (dist_parques + dist_restaurantes + dist_centros_comerciales)")
+    )
+  ) %>%
+  step_interact(
+    terms = as.formula(
+      paste0("~ (", paste(ptype_dums, collapse = "+"), 
+             ") : (", paste(amenities, collapse = "+"), ")")
+    )
+  ) %>%
+
+  # Eliminar columnas constantes
+  step_zv(all_predictors()) %>%
+
+  # Anti-colinealidad
+  step_corr(all_predictors(), threshold = 0.80) %>%     # quita variables muy correlacionadas
+  step_lincomb(all_predictors())                        # quitacombinaciones lineales
+
+prep_receta_01 <- prep(receta_01, training = train_learner, retain = TRUE)
+
+
+# Matrices finales
+
+
+train_mat <- bake(prep_reeta_01, new_data = train_learner)
+test_mat  <- bake(prep_receta_01, new_data = test_learner)
+
+X_train <- train_mat %>% select(-price)
+y_train <- train_mat$price
+
+# Alinear columnas
+X_test <- test_mat %>% select(colnames(X_train))
+
+
+# CV
+
+
+K <- 10
+N <- nrow(train_mat)
+fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
+cv_control <- list(V = K, validRows = fold_indices)
+
+
+# Modelos base REGULARIZADOS
+
+
+# Ranger regularizado
+SL.ranger.reg <- function(...) {
+  SL.ranger(...,
+    num.trees = 300,
+    mtry = max(2, floor(ncol(X_train) * 0.15)),
+    min.node.size = 10,
+    sample.fraction = 0.7
+  )
+}
+
+# XGBoost regularizado
+SL.xgboost.reg <- function(..., nrounds = 300) {
+  SL.xgboost(...,
+    nrounds = nrounds,
+    max_depth = 3,
+    eta = 0.05,
+    subsample = 0.7,
+    colsample_bytree = 0.7,
+    min_child_weight = 5,
+    gamma = 1,
+    lambda = 2
+  )
+}
+
+mix <- c(
+  "SL.glmnet",       # en vez de SL.lm → evita rank deficiency
+  "SL.mean",
+  "SL.ranger.reg",
+  "SL.xgboost.reg"
+)
+
+# Entrenar modelo
+
+sl_fit <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS", 
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+
+# Predicciones Test
+
+
+test_prediccion <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+test_results <- test_learner %>% mutate(price = test_prediccion)
+
+
+# Guardar
+
+
+sl_xgboost_ranger_01 <- test_results %>% 
+  select(property_id, price)
+
+write.csv(
+  sl_xgboost_ranger_01,
+  here("outputs", "kaggle_submissions", "sl_xgboost_ranger_01.csv"),
+  row.names = FALSE
+)
+```
+
+
+## Superlearner lm - random forest 
+
+Modelo SuperLearner especializado exclusivamente en apartamentos, filtrando el dataset y preparando los datos para ese segmento. Sus pasos principales son:
+
+- Filtrado del conjunto de entrenamiento para incluir solo propiedades tipo apartamento.
+
+- Conversión y alineación de factores entre los conjuntos de entrenamiento y prueba.
+
+- Transformación de las amenidades a variables numéricas.
+
+- Definición de una fórmula sin interacciones explícitas.
+
+- Creación de una receta que genera dummies y una interacción entre año y distancia a parques.
+
+- Construcción de matrices finales para modelado.
+
+- Entrenamiento del SuperLearner con modelos base lineales, Random Forest y un benchmark de media.
+
+- Predicción sobre el conjunto de prueba y corrección de valores mínimos.
+
+
+```{r}
+
+
+set.seed(123)
+
+
+# Filtramos solo apartamento
+
+train_apto <- train_final %>% 
+  filter(property_type == "Apartamento")
+
+test_apto <- test_final   # test → 94% apartamentos
+
+
+# variables a factor
+
+
+factors_to_fix <- c("month", "year", "localidad", "estrato")
+
+for (v in factors_to_fix) {
+  if (v %in% names(train_apto)) train_apto[[v]] <- as.factor(train_apto[[v]])
+  if (v %in% names(test_apto))  test_apto[[v]]  <- as.factor(test_apto[[v]])
+}
+
+# Alinear niveles 
+for (v in factors_to_fix) {
+  if (!(v %in% names(train_apto)) || !(v %in% names(test_apto))) next
+  
+  lvls <- union(levels(train_apto[[v]]), levels(test_apto[[v]]))
+  train_apto[[v]] <- factor(train_apto[[v]], levels = lvls)
+  test_apto[[v]]  <- factor(test_apto[[v]],  levels = lvls)
+}
+
+# Convertior amenidades como númericas
+
+amenities <- c(
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor", "has_gimnasio",
+  "has_piscina", "has_bbq", "has_zona_infantil", "has_balcon", "has_terraza",
+  "has_patio", "has_jardin_exterior", "has_chimenea", "has_cocina_integral",
+  "has_deposito", "has_estudio", "has_remodelado", "has_vista"
+)
+
+common <- intersect(amenities, names(train_apto))
+
+train_apto[common] <- lapply(train_apto[common], as.numeric)
+test_apto[common]  <- lapply(test_apto[common],  as.numeric)
+
+
+# Fórmula sin interacciones
+
+
+sl_02 <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + 
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito + 
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    localidad + estrato + longitude + latitude
+)
+
+
+# Receta
+
+receta_02 <- recipe(sl_02, data = train_apto) %>%
+  
+  # Crear dummies de factores
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  # Interacción año × parques (pandemia)
+  step_interact(
+    terms = ~ starts_with("year_") : dist_parques
+  ) %>%
+  
+  # Quitar columnas con valor único
+  step_zv(all_predictors())
+
+prep_receta_02 <- prep(receta_02, training = train_apto, retain = TRUE)
+
+# Matrices finales
+X_train <- bake(prep_receta_02, new_data = train_apto) %>% select(-price)
+y_train <- train_apto$price
+X_test  <- bake(prep_receta_02, new_data = test_apto)
+
+
+#Superlearner  - lineal , random 
+
+mix <- c(
+  "SL.lm",      
+  "SL.ranger",  
+  "SL.mean"     # benchmark evita explosiones
+)
+
+# Folds robustos
+N <- nrow(train_apto)
+K <- max(2, min(5, floor(N / 30)))  # mínimo 2, máximo 5, 30 obs por fold
+
+if (K < 2) stop("Muy pocos apartamentos para entrenar SuperLearner")
+
+set.seed(123)
+fold_indices <- split(sample(1:N), rep(1:K, length.out = N))
+cv_control <- list(V = K, validRows = fold_indices)
+
+sl_02 <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+# Predecir en test
+
+test_02 <- predict(sl_02, newdata = as.data.frame(X_test))$pred
+
+# valores mínimos coherentes
+test_02 <- pmax(test_02, 1)
+
+
+# Archivo acotado para kaggel
+output_02 <- test_apto %>%
+  select(property_id) %>%
+  mutate(price = test_02)
+
+#Guardar en carpeta
+
+write.csv(
+  output_02,
+  here("outputs", "kaggle_submissions", "sl_ranger_lm_02.csv"),
+  row.names = FALSE
+)
+
+
+
+
+```
+
+## Superlearner ranger - glmnet y xgboost
+
+Utiliza  un conjunto ampliado de variables derivadas y transformaciones diseñadas para mejorar la predicción del precio de vivienda. Incluye:
+
+- Selección y filtrado de variables relevantes desde train_learner y test_learner.
+
+- Creación de nuevas variables (raíz cuadrada de superficie, ratios, densidad, proximidades, año relativo, interacciones).
+
+- Cálculo del precio por m² por localidad y su imputación en train y test.
+
+- Transformación y alineación de factores, eliminando aquellos con un solo nivel.
+
+- Construcción de matrices de modelado mediante model.matrix, asegurando compatibilidad entre train y test.
+
+- Limpieza de nombres de columnas para compatibilidad con ranger, glmnet y xgboost.
+
+- Definición de validación cruzada y biblioteca híbrida de modelos del SuperLearner.
+
+- Entrenamiento del SuperLearner y predicción sobre el conjunto de prueba.
+
+
+```{r}
+set.seed(123)
+
+
+# Variables base que vamos a usar
+vars_base <- c(
+  "price",
+  "surface_total", "surface_covered", "bedrooms", "bathrooms",
+  "property_type", "month", "year",
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor",
+  "has_gimnasio", "has_piscina", "has_bbq", "has_zona_infantil",
+  "has_balcon", "has_terraza", "has_patio", "has_jardin_exterior",
+  "has_chimenea", "has_cocina_integral", "has_deposito",
+  "has_estudio", "has_remodelado", "has_vista",
+  "dist_parques", "dist_colegios", "dist_restaurantes",
+  "dist_autopistas", "dist_centros_comerciales",
+  "localidad", "estrato"
+)
+
+train_sl <- train_learner %>% select(any_of(vars_base))%>%mutate(year = as.numeric(year))
+test_sl  <- test_learner  %>% select(any_of(vars_base[vars_base != "price"]))%>%mutate(year=as.numeric(year))
+
+
+# Manipulación de variables
+
+# Transformaciones de superficie y densidad
+for (df_name in c("train_sl", "test_sl")) {
+  df <- get(df_name)
+
+  df <- df %>%
+    mutate(
+      surface_total_sq = sqrt(pmax(surface_total, 0)),
+      surface_ratio    = if_else(surface_total > 0,
+                                 surface_covered / surface_total,
+                                 NA_real_),
+      densidad         = if_else(surface_total > 20,
+                                 bedrooms / surface_total,
+                                 NA_real_)
+    )
+
+  assign(df_name, df, inherits = TRUE)
+}
+
+#  Precio m2 por localidad (solo desde train)
+pm2_localidad <- train_sl %>%
+  filter(!is.na(surface_total), surface_total > 0, !is.na(price)) %>%
+  mutate(pm2 = price / surface_total) %>%
+  group_by(localidad) %>%
+  summarise(pm2_loc = median(pm2, na.rm = TRUE), .groups = "drop")
+
+pm2_global <- median(pm2_localidad$pm2_loc, na.rm = TRUE)
+
+train_sl <- train_sl %>%
+  left_join(pm2_localidad, by = "localidad")
+
+test_sl <- test_sl %>%
+  left_join(pm2_localidad, by = "localidad")
+
+train_sl$pm2_loc[is.na(train_sl$pm2_loc)] <- pm2_global
+test_sl$pm2_loc[is.na(test_sl$pm2_loc)]   <- pm2_global
+
+# Distancias transformadas (proximidad)
+for (df_name in c("train_sl", "test_sl")) {
+  df <- get(df_name)
+
+  df <- df %>%
+    mutate(
+      parques_inv  = 1 / (1 + dist_parques),
+      colegios_inv = 1 / (1 + dist_colegios),
+      cc_inv       = 1 / (1 + dist_centros_comerciales)
+    )
+
+  assign(df_name, df, inherits = TRUE)
+}
+
+
+
+# Año relativo
+min_year <- min(train_sl$year, na.rm = TRUE)
+
+train_sl <- train_sl %>%
+  mutate(anio_relativo = as.numeric(year) - min_year)
+
+test_sl <- test_sl %>%
+  mutate(anio_relativo = as.numeric(year) - min_year)
+
+# Interacción año × dist_parques
+train_sl <- train_sl %>%
+  mutate(inter_year_parques = as.numeric(year) * dist_parques)
+
+test_sl <- test_sl %>%
+  mutate(inter_year_parques = as.numeric(year) * dist_parques)
+
+# Filtrar outliers extremos de superficie en train
+train_sl <- train_sl %>%
+  filter(!is.na(price),
+         !is.na(surface_total),
+         surface_total >= 15,
+         surface_total <= 800)
+
+# Factores y alineación de niveles
+
+
+factor_vars <- c("property_type", "month", "year", "localidad", "estrato")
+
+train_sl[factor_vars] <- lapply(train_sl[factor_vars], factor)
+test_sl[factor_vars]  <- lapply(test_sl[factor_vars],  factor)
+
+for (v in factor_vars) {
+  lvls <- union(levels(train_sl[[v]]), levels(test_sl[[v]]))
+  train_sl[[v]] <- factor(train_sl[[v]], levels = lvls)
+  test_sl[[v]]  <- factor(test_sl[[v]], levels = lvls)
+}
+
+# Eliminar factores con un solo nivel
+single_level <- factor_vars[
+  sapply(factor_vars, function(v)
+    length(unique(c(as.character(train_sl[[v]]),
+                    as.character(test_sl[[v]])))) < 2)
+]
+
+if (length(single_level) > 0) {
+  train_sl <- train_sl %>% select(-all_of(single_level))
+  test_sl  <- test_sl  %>% select(-all_of(single_level))
+}
+
+factor_vars <- setdiff(factor_vars, single_level)
+
+
+# Fórmula para model.matrix 
+
+sl_formula <- as.formula(
+  price ~ 
+    surface_total + surface_covered + surface_total_sq + surface_ratio + densidad +
+    bedrooms + bathrooms +
+    property_type + month + year + localidad + estrato +
+    has_parqueadero_garaje + has_seguridad + has_ascensor +
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito +
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    parques_inv + colegios_inv + cc_inv +
+    pm2_loc + inter_year_parques
+)
+
+
+# Construir matrices X e Y
+
+
+X_train_raw <- model.matrix(sl_formula, data = train_sl)
+y_train     <- train_sl$price
+
+X_test_raw  <- model.matrix(
+  delete.response(terms(sl_formula)),
+  data = test_sl
+)
+
+# Quitar intercepto
+X_train <- X_train_raw[, colnames(X_train_raw) != "(Intercept)", drop = FALSE]
+X_test  <- X_test_raw[,  colnames(X_train_raw) != "(Intercept)", drop = FALSE]
+
+# Alinear columnas entre train y test
+train_cols <- colnames(X_train)
+test_cols  <- colnames(X_test)
+
+faltantes <- setdiff(train_cols, test_cols)
+if (length(faltantes) > 0) {
+  X_test[, faltantes] <- 0
+}
+
+extra <- setdiff(test_cols, train_cols)
+if (length(extra) > 0) {
+  X_test <- X_test[, !(colnames(X_test) %in% extra), drop = FALSE]
+}
+
+X_test <- X_test[, train_cols, drop = FALSE]
+
+cat("dim(X_train): ", dim(X_train), "\n")
+cat("dim(X_test):  ", dim(X_test),  "\n")
+
+
+# Definir folds para SuperLearner
+
+
+N <- length(y_train)
+V <- 5
+fold_id <- sample(rep(1:V, length.out = N))
+validRows <- lapply(1:V, function(v) which(fold_id == v))
+
+cv_control <- list(V = V, validRows = validRows)
+
+#  Biblioteca de modelos (híbrido)
+
+SL.library <- c(
+  "SL.mean",     # baseline estable
+  "SL.lm",       # lineal
+  "SL.glmnet",   # lasso/ridge
+  "SL.ranger",   # random forest
+  "SL.xgboost"   # boosting
+)
+
+
+
+# Limpieza de nombres para ranger / xgboost / glmnet
+clean_names <- function(df) {
+  nm <- colnames(df)
+  
+  nm <- gsub(":", "_X_", nm)        # ranger NO permite ':'
+  nm <- gsub("[^[:alnum:]_]", "_", nm)   # cualquier cosa no alfanumérica
+  nm <- gsub("__+", "_", nm)        # colapsar múltiples '_'
+  
+  # ranger no permite nombres que comiencen con número
+  nm <- ifelse(grepl("^[0-9]", nm), paste0("X", nm), nm)
+  
+  colnames(df) <- nm
+  df
+}
+
+X_train <- clean_names(X_train)
+X_test  <- clean_names(X_test)
+
+
+# Entrenar SuperLearner
+
+
+sl_04 <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = SL.library,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+
+# Predicciones en test
+test_04 <- predict(sl_04, newdata = as.data.frame(X_test))$pred
+test_04 <- pmax(test_04, 1)
+
+# Acotar para subir a kaggel
+
+output_04 <- test_learner %>%
+  mutate(price = round(test_04)) %>%
+  select(property_id, price)
+
+dir.create(here("outputs", "kaggle_submissions"), showWarnings = FALSE, recursive = TRUE)
+
+write.csv(
+  output_04,
+  here("outputs", "kaggle_submissions", "sl_04.csv"),
+  row.names = FALSE
+)
+
+
+
+
+```
+
+
+
+## Superlearner glmet - ranger - xgboost
+
+Definición de la fórmula predictiva incluyendo localidad como variable clave.
+
+Creación de una receta que:
+
+- Agrupa localidades poco frecuentes.
+
+- Genera variables dummy.
+
+- Añade interacciones entre superficie y estrato.
+
+- Elimina predictores sin variación o altamente correlacionados.
+
+- Centra y escala todas las variables numéricas.
+
+- Generación de matrices finales alineadas para entrenamiento y prueba.
+
+- Entrenamiento del SuperLearner con modelos base regularizados (glmnet, ranger, xgboost).
+
+- Predicción del precio en el conjunto de prueba y generación del archivo de submission para Kaggle.
+
+
+```{r}
+# La fórmula ahora incluye 'localidad' como una variable predictora clave.
+model_formula_05 <- as.formula(
+  price ~
+    surface_total + surface_covered + bedrooms + bathrooms + latitude + longitude +
+    dist_parques + dist_colegios + dist_restaurantes + dist_autopistas + dist_centros_comerciales +
+    property_type + month + year + estrato + localidad + # <--- ¡LOCALIDAD ES UNA FEATURE!
+    has_parqueadero_garaje + has_seguridad + has_ascensor + has_gimnasio + has_piscina +
+    has_bbq + has_zona_infantil + has_balcon + has_terraza +
+    has_patio + has_jardin_exterior + has_chimenea + has_cocina_integral +
+    has_deposito + has_estudio + has_remodelado + has_vista
+)
+
+# Creamos la receta de preprocesamiento
+rec_sl_05 <- recipe(model_formula_05, data = train_learner) %>%
+  # Agrupamos localidades poco frecuentes en una categoría "otros"
+  step_other(localidad, threshold = 0.01, other = "otra_localidad") %>%
+  # Convertir todas las variables categóricas a dummies
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  # Interacción entre área y estrato
+  step_interact(terms = ~ starts_with("surface_") : starts_with("estrato_")) %>%
+  # Limpieza de variables
+  step_zv(all_predictors()) %>%
+  step_corr(all_predictors(), threshold = 0.85) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# Entrenamos la receta
+
+prep_rec <- prep(rec, training = train_learner)
+
+
+# Aplicamos la receta para crear las matrices finales
+X_train <- bake(prep_rec, new_data = train_learner) %>% select(-price)
+y_train <- bake(prep_rec, new_data = train_learner) %>% pull(price)
+X_test <- bake(prep_rec, new_data = test_learner) %>% select(-price)
+
+# Alinear columnas por si alguna dummy no apareció en test
+common_cols <- intersect(colnames(X_train), colnames(X_test))
+X_train <- X_train[, common_cols]
+X_test <- X_test[, common_cols]
+
+
+# Entrenamiento superlearner
+
+# Definimos los modelos base
+SL.ranger.reg <- function(...) SL.ranger(..., num.trees = 500, mtry = floor(sqrt(ncol(X_train))), min.node.size = 10)
+SL.xgboost.reg <- function(...) SL.xgboost(..., nrounds = 500, max_depth = 4, eta = 0.05, subsample = 0.7, colsample_bytree = 0.7)
+learner_library <- c("SL.glmnet", "SL.ranger.reg", "SL.xgboost.reg")
+# Definimos la validación cruzada
+set.seed(1234)
+cv_control <- SuperLearner.CV.control(V = 5)
+
+# Entrenamos el SuperLearner
+
+sl_fit_05 <- SuperLearner(
+  Y = y_train, X = as.data.frame(X_train),
+  SL.library = learner_library, method = "method.NNLS",
+  family = gaussian(), cvControl = cv_control
+)
+
+print(sl_fit)
+
+
+# Realizamos la predicción en los datos de prueba
+final_predictions <- predict(sl_fit, newdata = as.data.frame(X_test))
+precios_finales <- final_predictions$pred
+
+# Creamos el dataframe de submission
+submission <- tibble(
+  property_id = test_learner$property_id,
+  price = round(precios_finales, 0) # El '0' significa redondear a 0 decimales
+)
+
+# Guardamos el archivo
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+ruta_archivo_submission <- here::here(ruta_destino, "submission_superlearner_full.csv")
+# Convertir matriz a vector
+submission$price <- as.vector(submission$price)
+
+# Guardar sin errores
+write_csv(submission, ruta_archivo_submission)
+
+message(paste0("\nArchivo de submission guardado en:\n", ruta_archivo_submission))
+
+# (Opcional) Ver un resumen de las predicciones solo para Chapinero
+submission_chapinero <- submission %>%
+  inner_join(test_final %>% select(property_id, localidad), by = "property_id") %>%
+  filter(localidad == "Localidad Chapinero")
+
+
+summary(submission_chapinero$price)
+
+boxplot(submission_chapinero$price,
+        main = "Boxplot de precios predichos en Chapinero")
+
+
+```
+
+
+
+```{r}
+
+### VRESION 2 
+
+#  Limpieza de Outliers en Precio (solo en Train) 
+# Esto estabiliza el entrenamiento del modelo
+q_low  <- quantile(train_final$price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_final$price, 0.99, na.rm = TRUE)
+train_learner2 <- train_final %>%
+  filter(price >= q_low & price <= q_high)
+test_learner2 <- test_final # No filtramos el test set
+
+# CREAR LA VARIABLE OBJETIVO CORRECTA: log(price) 
+train_learner2 <- train_learner2 %>% mutate(log_price = log1p(price))
+
+
+# Variables numéricas clave
+features_numericas <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude", "dist_parques", "dist_colegios", "dist_restaurantes"
+)
+
+# Dummies de texto más informativas (aquellas con una frecuencia entre 5% y 95%)
+# Esto elimina las que son demasiado raras o demasiado comunes
+dummy_info <- train_learner2 %>%
+  select(starts_with("has_")) %>%
+  summarise(across(everything(), mean)) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "frequency") %>%
+  filter(frequency > 0.05 & frequency < 0.95)
+
+features_dummies <- dummy_info$feature
+
+# Variables categóricas
+features_categoricas <- c("property_type", "localidad")
+
+# Conjunto final de predictores
+all_features <- c(features_numericas, features_dummies, features_categoricas)
+
+# Filtramos los dataframes para quedarnos solo con las variables que usaremos
+train_learner2 <- train_learner2 %>% select(all_of(all_features), property_id, log_price)
+test_learner2  <- test_learner2  %>% select(all_of(all_features), property_id)
+
+
+# Definición de la receta de preprocesamiento mejorada 
+
+# Unificar niveles de factores antes de la receta
+for (v in features_categoricas) {
+  lvls <- union(levels(as.factor(train_learner2[[v]])), levels(as.factor(test_learner2[[v]])))
+  train_learner2[[v]] <- factor(train_learner2[[v]], levels = lvls)
+  test_learner2[[v]]  <- factor(test_learner2[[v]],  levels = lvls)
+}
+
+# La fórmula ahora se construye dinámicamente
+model_formula <- as.formula(paste("log_price ~", paste(all_features, collapse = " + ")))
+
+# Creamos una receta de preprocesamiento más potente
+rec <- recipe(model_formula, data = train_learner2) %>%
+  # Tratar variables numéricas sesgadas aplicándoles logaritmo
+  step_log(all_of(c("surface_total", "surface_covered", "dist_parques", "dist_colegios", "dist_restaurantes")), offset = 1) %>%
+  # Agrupar localidades poco frecuentes
+  step_other(localidad, threshold = 0.02, other = "otra_localidad") %>%
+  # Manejar categorías nuevas que puedan aparecer en test
+  step_novel(all_nominal_predictors()) %>%
+  # Convertir todas las variables categóricas a dummies
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  # Eliminar variables con varianza cero
+  step_zv(all_predictors()) %>%
+  # Centrar y escalar
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# Entrenamos la receta
+
+prep_rec <- prep(rec, training = train_learner2)
+
+# Aplicamos la receta para crear las matrices finales
+X_train <- bake(prep_rec, new_data = train_learner2) %>% select(-log_price)
+y_train <- bake(prep_rec, new_data = train_learner2) %>% pull(log_price) # <-- AHORA 'y_train' ES log_price
+X_test  <- bake(prep_rec, new_data = test_learner2)
+
+# Alinear columnas finales
+common_cols <- intersect(colnames(X_train), colnames(X_test))
+X_train <- X_train[, common_cols]
+X_test  <- X_test[, common_cols]
+
+
+# Modelos base con hiperparámetros ligeramente más potentes
+SL.ranger.tuned <- function(...) SL.ranger(..., num.trees = 750, mtry = floor(ncol(X_train) / 3), min.node.size = 5)
+SL.xgboost.tuned <- function(...) SL.xgboost(..., nrounds = 1000, max_depth = 5, eta = 0.03, subsample = 0.8, colsample_bytree = 0.8)
+learner_library <- c("SL.glmnet", "SL.ranger.tuned", "SL.xgboost.tuned")
+
+set.seed(1234)
+cv_control <- SuperLearner.CV.control(V = 5)
+
+
+sl_fit <- SuperLearner(
+  Y = y_train, X = as.data.frame(X_train),
+  SL.library = learner_library, method = "method.NNLS",
+  family = gaussian(), cvControl = cv_control
+)
+
+print(sl_fit)
+
+# Realizamos la predicción (el resultado estará en escala logarítmica)
+log_predictions <- predict(sl_fit, newdata = as.data.frame(X_test))$pred
+
+# ¡PASO CLAVE! Convertimos las predicciones a la escala de precios original
+precios_finales <- expm1(log_predictions)
+
+# Creamos el dataframe de submission
+submission <- tibble(
+  property_id = test_learner2$property_id,
+  price = round(precios_finales, 0) # El '0' significa redondear a 0 decimales
+)
+
+# Guardamos el archivo
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+ruta_archivo_submission <- here::here(ruta_destino, "submission_superlearner_improved.csv")
+# Convertir matriz a vector
+submission$price <- as.vector(submission$price)
+
+write_csv(submission, ruta_archivo_submission)
+
+
+# --- Verificación de las Predicciones ---
+
+summary(submission$price / 1e6)
+
+# Ver un resumen de las predicciones solo para Chapinero
+submission_chapinero <- submission %>%
+  inner_join(test_final %>% select(property_id, localidad), by = "property_id") %>%
+  filter(localidad == "Localidad Chapinero")
+
+summary(submission_chapinero$price / 1e6)
+
+```
+
+
+
+
