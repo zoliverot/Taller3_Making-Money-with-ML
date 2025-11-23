@@ -1,0 +1,11 @@
+---
+### **Propósito:** Evaluar cómo cambia el desempeño usando validación espacial.
+---
+title: "06 - Spatial Cross Validation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+source("../origen/config.R")
+source("../origen/modeling_utils.R")
+```
