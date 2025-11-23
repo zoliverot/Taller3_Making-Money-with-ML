@@ -2,7 +2,7 @@
 ### **Propósito:** REGRESION LINEAL.
 ```
 ---
-title: "04 - Regresión Lineal "
+title: "04 - Regresión Lineal"
 output: html_document
 ---
 
