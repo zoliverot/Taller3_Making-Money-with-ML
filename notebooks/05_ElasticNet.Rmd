@@ -655,3 +655,236 @@ cat(paste0(ruta_salida, file_name), "\n")
 
 ```
 
+# ELASTIC NET 5
+
+```{r}
+message("Cargando los dataframes finales procesados...")
+train_full <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_full  <- readRDS(here::here("data", "processed", "test_final.rds"))
+message("Datos finales cargados.")
+
+# -- CREAR LA VARIABLE OBJETIVO CORRECTA: log(price) --
+train_full <- train_full %>% mutate(log_price = log1p(price))
+
+# -- Limpieza de Outliers en Precio --
+q_low  <- quantile(train_full$log_price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_full$log_price, 0.99, na.rm = TRUE)
+train_full <- train_full %>% filter(log_price >= q_low & log_price <= q_high)
+```
+
+DIVISIÓN ESPACIAL: TRAIN vs. PRUEBA
+
+```{r}
+message("\nDividiendo los datos")
+
+train <- train_full
+
+# El conjunto real para submission
+test_submission <- test_full
+
+message(paste("Tamaño del set de entrenamiento:", nrow(train)))
+```
+
+DEFINICIÓN DE RECETAS
+
+```{r}
+message("\nDefiniendo recetas de preprocesamiento...")
+
+has_vars <- names(dplyr::select(train, starts_with("has_")))
+
+features <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
+  "dist_parques", "dist_colegios", "dist_restaurantes",
+  "latitude", "longitude",
+  "property_type",
+  has_vars
+)
+
+model_formula <- as.formula(paste("log_price ~", paste(features, collapse = " + ")))
+
+# -- Receta 1 --
+rec_1 <- recipe(model_formula, data = train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_interact(terms = ~ surface_total:estrato + surface_covered:estrato) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+# -- Receta 2 --
+rec_2 <- recipe(model_formula, data = train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_interact(terms = ~ surface_total:estrato + surface_covered:estrato) %>%
+  step_poly(dist_parques, dist_colegios, dist_restaurantes, degree = 2) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+message("Dos recetas creadas.")
+```
+
+ESPECIFICACIÓN DEL MODELO Y TUNING GRID
+
+```{r}
+elastic_net_spec <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>% set_engine("glmnet")
+
+set.seed(123)
+tuning_grid <- grid_regular(
+  penalty(range = c(-4, 0)),
+  mixture(range = c(0, 1)),
+  levels = 5
+)
+
+set.seed(456)
+cv_folds <- vfold_cv(train, v = 5)
+
+```
+
+WORKFLOWS Y TUNING
+
+```{r}
+workflow_1 <- workflow() %>% add_recipe(rec_1) %>% add_model(elastic_net_spec)
+workflow_2 <- workflow() %>% add_recipe(rec_2) %>% add_model(elastic_net_spec)
+
+message("\nIniciando tuning para Workflow 1...")
+tune_res1 <- tune_grid(
+  workflow_1,
+  resamples = cv_folds,
+  grid = tuning_grid,
+  metrics = metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+)
+message("Tuning para Workflow 1 completado.")
+
+message("\nIniciando tuning para Workflow 2...")
+tune_res2 <- tune_grid(
+  workflow_2,
+  resamples = cv_folds,
+  grid = tuning_grid,
+  metrics = metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+)
+message("Tuning para Workflow 2 completado.")
+
+```
+
+SELECCIÓN DE MEJORES PARÁMETROS
+
+```{r}
+message("\n--- Resultados del Tuning ---")
+
+message("\n-- Workflow 1 (Base) --")
+show_best(tune_res1, metric = "rmse")
+
+message("\n-- Workflow 2 (Polinómico) --")
+show_best(tune_res2, metric = "rmse")
+
+best_params_1 <- select_best(tune_res1, metric = "rmse")
+best_params_2 <- select_best(tune_res2, metric = "rmse")
+
+print(best_params_1)
+print(best_params_2)
+
+```
+
+
+
+```{r}
+tidymodels::tidymodels_prefer()
+
+model_final_1 <- linear_reg(
+  penalty = best_params_1$penalty,
+  mixture = best_params_1$mixture
+) %>% set_engine("glmnet")
+
+model_final_2 <- linear_reg(
+  penalty = best_params_2$penalty,
+  mixture = best_params_2$mixture
+) %>% set_engine("glmnet")
+
+final_workflow_1 <- workflow() %>% add_recipe(rec_1) %>% add_model(model_final_1)
+final_workflow_2 <- workflow() %>% add_recipe(rec_2) %>% add_model(model_final_2)
+
+```
+
+ENTRENAMIENTO FINAL
+
+```{r}
+message("\n=== Entrenando Modelos Finales ===")
+
+fit_final_1 <- fit(final_workflow_1, data = train)
+fit_final_2 <- fit(final_workflow_2, data = train)
+
+message("Modelos finales entrenados correctamente.")
+
+```
+
+
+MÉTRICAS SOBRE TRAIN
+
+```{r}
+pred_train_1 <- predict(fit_final_1, train)$.pred
+pred_train_2 <- predict(fit_final_2, train)$.pred
+
+train_results <- tibble(
+  real = train$log_price,
+  pred_1 = pred_train_1,
+  pred_2 = pred_train_2
+)
+
+message("\n=== Métricas ===")
+metricas_1 <- metrics(train_results, truth = real, estimate = pred_1)
+metricas_2 <- metrics(train_results, truth = real, estimate = pred_2)
+
+print(metricas_1)
+print(metricas_2)
+
+```
+
+SELECCIÓN DEL MEJOR MODELO
+
+```{r}
+# Usamos RMSE de train para decidir
+if (metricas_1$.estimate[metricas_1$.metric == "rmse"] <
+    metricas_2$.estimate[metricas_2$.metric == "rmse"]) {
+  
+  best_fit <- fit_final_1
+  message("\nEl Workflow 1 fue el mejor.")
+  
+} else {
+  best_fit <- fit_final_2
+  message("\nEl Workflow 2 fue el mejor.")
+}
+
+```
+
+PREDICCIÓN FINAL 
+
+```{r}
+message("\nGenerando predicciones para Submission...")
+
+predictions_kaggle <- predict(best_fit, test_submission)$.pred
+price_final <- expm1(predictions_kaggle)
+
+submission <- tibble(
+  property_id = test_submission$property_id,
+  price = round(price_final)
+)
+
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+
+ruta_archivo <- here::here(ruta_destino, "ElasticNet_v5.csv")
+write_csv(submission, ruta_archivo)
+
+message("\nArchivo guardado en:")
+message(ruta_archivo)
+
+summary(submission$price)
+
+```
+
+
+
