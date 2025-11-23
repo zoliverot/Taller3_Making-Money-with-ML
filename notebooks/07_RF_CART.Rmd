@@ -1,5 +1,5 @@
 ---
-###**Propósito:** Entrenamiento Random Forest y CART
+###Entrenamiento Random Forest y CART
 ---
 title: "07 - RF y CART"
 output: html_document
@@ -17,32 +17,30 @@ source("../origen/data_utils.R")
 knitr::opts_chunk$set(echo = TRUE)
 
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
-pacman::p_load(dplyr, rpart, readr, tibble, purrr, forcats)
+pacman::p_load(dplyr, rpart, readr, tibble, purrr, forcats, tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet)
 ```
 
 ```{r}
-
-#Bases de datos 
-test <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/test_final.rds"))
-
-train <- readRDS(url("https://github.com/zoliverot/Taller3_Making-Money-with-ML/raw/refs/heads/main/data/processed/train_final.rds"))
-
+#Bases de datos
+train_ruta <- "C:/Users/crist/Downloads/datos/train_final.csv"
+test_ruta <- "C:/Users/crist/Downloads/datos/train_final.csv"
+test <- readr::read.csv(test_ruta, locale(encoding = "UTF-8"))
+train <- read::read.csv(test_ruta, locale(encoding = "UTF-8"))
 ```
 
 
 ```{r}
-
-# ==== PREP LISTO PARA ENTRENAR (RF / CART) ====
-
+# RF Y CART
 target  <- if ("price" %in% names(train)) "price" else stop("No encuentro 'price' en train.")
 id_col  <- if ("property_id" %in% names(train)) "property_id" else NULL
 
-# 1) Forzar factores planificados
+# Forzar factores planificados
 fac_cols <- intersect(c("month","year","localidad","estrato"), names(train))
 train <- train %>% mutate(across(all_of(fac_cols), ~as.factor(.)))
 test  <- test  %>% mutate(across(all_of(fac_cols), ~as.factor(.)))
 
-# 2) Alinear niveles de factores entre train y test (unión de niveles)
+# Alinear niveles de factores entre train y test
 align_levels <- function(tr, te, cols){
   for (c in cols) {
     lvls <- union(levels(tr[[c]]), levels(te[[c]]))
@@ -54,7 +52,7 @@ align_levels <- function(tr, te, cols){
 tmp <- align_levels(train, test, fac_cols)
 train <- tmp$train; test <- tmp$test
 
-# 3) Re-codificar dummies has_* a 0/1 (seguro)
+# codificar dummies
 binary_vars <- intersect(c(
   "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
   "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
@@ -63,7 +61,6 @@ binary_vars <- intersect(c(
 ), names(train))
 
 to01 <- function(x){
-  # pasa factor/char/lógico/num a 0/1 de forma robusta
   if (is.factor(x)) x <- as.character(x)
   if (is.character(x)) {
     x <- tolower(trimws(x))
@@ -77,21 +74,21 @@ to01 <- function(x){
 train <- train %>% mutate(across(all_of(binary_vars), to01))
 test  <- test  %>% mutate(across(all_of(binary_vars),  to01))
 
-# Reemplazar NA en dummies por 0 (ausencia)
+# Reemplazar NA en dummies por 0
 train <- train %>% mutate(across(all_of(binary_vars), ~replace_na(., 0L)))
 test  <- test  %>% mutate(across(all_of(binary_vars),  ~replace_na(., 0L)))
 
-# 4) Remover columnas indeseadas si existen
+# Remover columnas indeseadas si existen
 vars_remove <- intersect(c("has_pisos_vivienda","has_salon_social"), names(train))
 train <- train %>% select(-all_of(vars_remove))
 test  <- test  %>% select(-all_of(vars_remove))
 
-# 5) Remover texto crudo si aún existe
+# Remover texto crudo
 txt_to_rm <- intersect(c("title","description"), names(train))
 train <- train %>% select(-all_of(txt_to_rm))
 test  <- test  %>% select(-all_of(txt_to_rm))
 
-# 6) Eliminar columnas de varianza cero (usando recipe para detectar y aplicar)
+# Eliminar columnas de varianza cero
 rec_zv <- recipe(as.formula(paste(target, "~ .")), data = train) %>%
   update_role(any_of(id_col), new_role = "id") %>%
   step_zv(all_predictors())
@@ -100,7 +97,7 @@ rec_zv_prep <- prep(rec_zv, training = train, verbose = FALSE)
 train_nzv   <- bake(rec_zv_prep, new_data = NULL)
 test_nzv    <- bake(rec_zv_prep, new_data = test)
 
-# 7) Imputación ligera de NAs residuales (si quedaran)
+# Imputación ligera de NAs residuales
 rec_imp <- recipe(as.formula(paste(target, "~ .")), data = train_nzv) %>%
   update_role(any_of(id_col), new_role = "id") %>%
   step_impute_median(all_numeric_predictors()) %>%
@@ -112,190 +109,44 @@ test_ready   <- bake(rec_imp_prep, new_data = test_nzv)
 
 ```
 
-## CART
 
 ```{r}
+
+# CART Y RF CON CROSS VALIDATION
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(dplyr, rsample, rpart, ranger, purrr, tibble, readr, rlang)
 
 set.seed(2025)
+stopifnot(exists("train_ready"), exists("test_ready"))
 
-price    <- if ("price" %in% names(train_ready)) "price"
-id_col <- intersect(c("property_id","id"), names(train_ready))
-id_col <- if (length(id_col)) id_col[[1]] else NULL
+tgt <- "price"
 
-train <- train_ready
-test  <- test_ready
+# TRATAMIENTO
+id_candidates <- c("property_id","id")
+id_name <- intersect(id_candidates, union(names(train_ready), names(test_ready)))
+id_name <- if (length(id_name)) id_name[[1]] else "id"
+id_vals <- if (id_name %in% names(test_ready)) as.character(test_ready[[id_name]]) else seq_len(nrow(test_ready))
 
-# 1) Guardar ID para submission y asegurar que NO sea factor en test/train
-id_test <- if (!is.null(id_col) && id_col %in% names(test)) as.character(test[[id_col]]) else seq_len(nrow(test))
-if (!is.null(id_col)) {
-  train[[id_col]] <- as.character(train[[id_col]])
-  test [[id_col]] <- as.character(test [[id_col]])
-}
-
-# 2) Quitar texto crudo si quedó
-drop_txt <- intersect(c("title","description"), names(train))
-train <- dplyr::select(train, -all_of(drop_txt))
-test  <- dplyr::select(test,  -all_of(drop_txt))
-
-# 3) Quitar el ID de los predictores (clave para evitar el error)
-if (!is.null(id_col)) {
-  train_model <- dplyr::select(train, -all_of(id_col))
-  test_model  <- dplyr::select(test,  -all_of(id_col))
-} else {
-  train_model <- train
-  test_model  <- test
-}
-
-# 4) Alinear niveles de TODAS las categóricas entre train/test
-is_cat <- function(x) is.factor(x) || is.character(x)
-fac_cols <- names(Filter(is_cat, train_model[, setdiff(names(train_model), tgt), drop = FALSE]))
-for (c in fac_cols) {
-  trf <- if (is.factor(train_model[[c]])) train_model[[c]] else factor(as.character(train_model[[c]]))
-  tef <- if (is.factor(test_model [[c]])) test_model [[c]] else factor(as.character(test_model [[c]]))
-  lvls <- union(levels(trf), levels(tef))
-  train_model[[c]] <- forcats::fct_explicit_na(factor(trf, levels = lvls), na_level = "unknown")
-  test_model [[c]] <- forcats::fct_explicit_na(factor(tef, levels = lvls), na_level = "unknown")
-}
-
-# 5) Imputar NAs numéricos por mediana de TRAIN (rápido y seguro para CART)
-num_cols <- setdiff(names(Filter(is.numeric, train_model)), tgt)
-for (c in num_cols) {
-  med <- suppressWarnings(stats::median(train_model[[c]], na.rm = TRUE))
-  if (is.finite(med)) {
-    if (anyNA(train_model[[c]])) train_model[[c]][is.na(train_model[[c]])] <- med
-    if (c %in% names(test_model) && anyNA(test_model[[c]])) test_model[[c]][is.na(test_model[[c]])] <- med
-  }
-}
-
-# 6) Remover columnas sin varianza (evita splits inútiles)
-zv <- names(which(sapply(train_model[, setdiff(names(train_model), tgt), drop = FALSE],
-                         function(v) dplyr::n_distinct(v, na.rm = TRUE) <= 1)))
-if (length(zv) > 0) {
-  train_model <- dplyr::select(train_model, -all_of(zv))
-  test_model  <- dplyr::select(test_model,  -all_of(zv))
-}
-
-# 7) Entrenar CART con poda 1-SE
-form <- as.formula(paste(tgt, "~ ."))
-ctrl <- rpart.control(cp = 0.001, minsplit = 20, maxdepth = 12, xval = 10)
-cart_raw <- rpart(formula = form, data = train_model, method = "anova", control = ctrl)
-
-cpt      <- cart_raw$cptable
-i_min    <- which.min(cpt[, "xerror"])
-cp_opt   <- cpt[max(which(cpt[, "xerror"] <= cpt[i_min, "xerror"] + cpt[i_min, "xstd"])), "CP"]
-cart     <- rpart::prune(cart_raw, cp = cp_opt)
-
-# 8) Predicción y archivo para Kaggle
-pred_test <- predict(cart, newdata = test_model)
-pred_test <- pmax(pred_test, 0)  # por seguridad
-
-submission <- tibble(
-  !!(if (!is.null(id_col)) id_col else "id") := id_test,
-  price = round(pred_test)
-)
-#readr::write_csv(submission, "submission_cart_from_ready.csv")
-#cat("Archivo guardado: submission_cart_from_ready.csv\n")
-
-```
-
-```{r}
-
-# ==== MAE (train) para el CART ya entrenado ====
+# CALCULAR MAE
 MAE <- function(y, yhat) mean(abs(y - yhat), na.rm = TRUE)
+drop_id <- function(df) dplyr::select(df, -dplyr::any_of(id_candidates))
+X  <- drop_id(train_ready)
+Xt <- drop_id(test_ready)
 
-y_true <- train_model[[tgt]]
-y_pred <- predict(cart, newdata = train_model)
-
-mae_train_cart <- MAE(y_true, y_pred)
-cat("MAE (train) CART:", round(mae_train_cart, 4), "\n")
-```
-
-## Random Forest
-
-```{r}
-id_vals <- if (!is.null(id_col) && id_col %in% names(test)) as.character(test[[id_col]]) else seq_len(nrow(test))
-if (!is.null(id_col)) { train[[id_col]] <- as.character(train[[id_col]]); test[[id_col]] <- as.character(test[[id_col]]) }
-train_model <- if (!is.null(id_col)) dplyr::select(train, -all_of(id_col)) else train
-test_model  <- if (!is.null(id_col)) dplyr::select(test,  -all_of(id_col))  else test
-# Entrenar RF sin tuning
-p  <- ncol(train_model) - 1L
-rf <- ranger(
-  formula         = as.formula(paste(tgt, "~ .")),
-  data            = train_model,
-  num.trees       = 1000,
-  mtry            = max(2L, floor(sqrt(p))),
-  min.node.size   = 8,
-  sample.fraction = 0.80,
-  importance      = "impurity",
-  seed            = 2025
-)
-
-# Predecir correctamente (nota: argumento es 'object')
-pred_test <- predict(object = rf, data = test_model)$predictions
-pred_test <- pmax(pred_test, 0)
-
-id_name <- if (!is.null(id_col)) id_col else "id"
-#submission <- tibble(!!id_name := id_vals, price = round(pred_test))
-#write_csv(submission, "submission_rf_notuned.csv")
-```
-
-
-```{r}
-# ==== MAE (train) para el CART ya entrenado ====
-MAE <- function(y, yhat) mean(abs(y - yhat), na.rm = TRUE)
-
-y_true <- train_model[[tgt]]
-y_pred_train <- pred_test
-mae_train_rf <- MAE(y_true, y_pred_train)
-
-mae_train_cart <- MAE(y_true, y_pred)
-cat("MAE (train) RF:", round(mae_train_rf, 4), "\n")
-```
-
-```{r}
-
-# ===== CV regular vs CV espacial (MAE) para CART y RF =====
-if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
-pacman::p_load(dplyr, rsample, rpart, ranger, forcats, purrr, tibble, readr)
-
-stopifnot(exists("train_ready"))
-tgt    <- if ("price" %in% names(train_ready)) "price" else stop("No encuentro 'price' en train_ready.")
-id_col <- intersect(c("property_id","id"), names(train_ready)); id_col <- if (length(id_col)) id_col[[1]] else NULL
-
-# --- Utilidades ---
-MAE <- function(y, yhat) mean(abs(y - yhat), na.rm = TRUE)
-X <- train_ready
-
-# Alinear niveles categóricos entre dos data.frames (evita "new levels")
-align_factors <- function(tr, va, exclude = NULL){
-  is_cat <- function(x) is.factor(x) || is.character(x)
-  cols <- intersect(names(Filter(is_cat, tr)), names(Filter(is_cat, va)))
-  cols <- setdiff(cols, exclude %||% character(0))
-  for (c in cols) {
-    trc <- if (is.factor(tr[[c]])) tr[[c]] else factor(as.character(tr[[c]]))
-    vac <- if (is.factor(va[[c]])) va[[c]] else factor(as.character(va[[c]]))
-    lv  <- union(levels(trc), levels(vac))
-    tr[[c]] <- forcats::fct_explicit_na(factor(trc, levels = lv), na_level = "unknown")
-    va[[c]] <- forcats::fct_explicit_na(factor(vac, levels = lv), na_level = "unknown")
-  }
-  list(tr = tr, va = va)
-}
-
-# CART: crecer y podar por regla 1-SE
-fit_cart_1se <- function(df, tgt = "price"){
-  ctrl <- rpart::rpart.control(cp = 0.001, minsplit = 20, maxdepth = 12, xval = 10)
+# MODELOS
+fit_cart_1se <- function(df){
   form <- as.formula(paste(tgt, "~ ."))
+  ctrl <- rpart::rpart.control(cp = 0.001, minsplit = 20, maxdepth = 12, xval = 10)
   raw  <- rpart::rpart(form, data = df, method = "anova", control = ctrl)
   cpt  <- raw$cptable
   i_min <- which.min(cpt[, "xerror"])
-  cp_opt <- cpt[max(which(cpt[, "xerror"] <= cpt[i_min, "xerror"] + cpt[i_min, "xstd"])),"CP"]
+  cp_opt <- cpt[max(which(cpt[, "xerror"] <= cpt[i_min,"xerror"] + cpt[i_min,"xstd"])),"CP"]
   if (is.na(cp_opt)) cp_opt <- cpt[i_min,"CP"]
   rpart::prune(raw, cp = cp_opt)
 }
 pred_cart <- function(mod, newdata) predict(mod, newdata = newdata)
 
-# RF sin tuning (coherente con tu setup)
-fit_rf <- function(df, tgt = "price"){
+fit_rf <- function(df){
   p <- ncol(df) - 1L
   ranger::ranger(
     as.formula(paste(tgt, "~ .")), data = df,
@@ -306,51 +157,65 @@ fit_rf <- function(df, tgt = "price"){
 }
 pred_rf <- function(mod, newdata) predict(mod, data = newdata)$predictions
 
-# Evaluación genérica sobre un objeto rsample
-cv_eval <- function(folds, data, fit_fun, pred_fun, tgt = "price"){
-  res <- purrr::map_dbl(folds$splits, function(s){
-    tr <- rsample::analysis(s); va <- rsample::assessment(s)
-    tmp <- align_factors(tr, va, exclude = tgt); tr <- tmp$tr; va <- tmp$va
-    fit <- fit_fun(tr, tgt)
-    prd <- pred_fun(fit, va)
-    MAE(va[[tgt]], prd)
-  })
-  tibble(mae = res, fold = seq_along(res))
-}
+# CV estándar
+v <- 5
+v_regular <- rsample::vfold_cv(X, v = v)
 
-# -------- 1) CV REGULAR (aleatoria, K-fold) --------
-set.seed(2025)
-v_regular <- rsample::vfold_cv(X, v = 5)  # 5 folds para tiempo razonable
+mae_cart_reg <- purrr::map_dbl(v_regular$splits, function(s){
+  tr <- rsample::analysis(s); va <- rsample::assessment(s)
+  fit <- fit_cart_1se(tr); prd <- pred_cart(fit, va); MAE(va[[tgt]], prd)
+})
+mae_rf_reg <- purrr::map_dbl(v_regular$splits, function(s){
+  tr <- rsample::analysis(s); va <- rsample::assessment(s)
+  fit <- fit_rf(tr); prd <- pred_rf(fit, va); MAE(va[[tgt]], prd)
+})
 
-mae_cart_reg <- cv_eval(v_regular, X, fit_cart_1se, pred_cart, tgt) %>% mutate(model = "CART", scheme = "regular")
-mae_rf_reg   <- cv_eval(v_regular, X, fit_rf,       pred_rf,   tgt) %>% mutate(model = "RF",   scheme = "regular")
+# CART
+cart_full <- fit_cart_1se(X)
+pred_cart_test <- pmax(pred_cart(cart_full, Xt), 0)
+readr::write_csv(tibble(!!id_name := id_vals, price = round(pred_cart_test)),
+                 "CART_12_20_0.001.csv")
 
-# -------- 2) CV ESPACIAL --------
-# Opción A: por columna geográfica si existe
+# RF CV ESTANDAR
+rf_full <- fit_rf(X)
+pred_rf_test <- pmax(pred_rf(rf_full, Xt), 0)
+readr::write_csv(tibble(!!id_name := id_vals, price = round(pred_rf_test)),
+                 "RF_1000_10_0.8.csv")
+
+# RF CV ESPACIAL
 group_col <- dplyr::case_when(
-  "dist_parques"          %in% names(X) ~ "dist_parques",
-  "dist_colegios" %in% names(X) ~ "dist_colegios",
-  "dist_restaurantes"    %in% names(X) ~ "dist_restaurantes",
-  "dist_autopistas"    %in% names(X) ~ "dist_autopistas",
-  "dist_centros_comerciales"    %in% names(X) ~ "dist_centros_comerciales",
+  "dist_parques"          %in% names(train_ready) ~ "dist_parques",
+  "dist_colegios" %in% names(train_ready) ~ "dist_colegios",
+  "dist_restaurantes"    %in% names(train_ready) ~ "dist_restaurantes",
+  "dist_autopistas"    %in% names(train_ready) ~ "dist_autopistas",
+  "dist_centros_comerciales"    %in% names(train_ready) ~ "dist_centros_comerciales",
   TRUE ~ NA_character_
 )
 
-if (!is.na(group_col)) {
-  v_spatial <- rsample::group_vfold_cv(X, v = 5, group = !!rlang::sym(group_col))
+v_spatial <- rsample::group_vfold_cv(X, v = v, group = !!rlang::sym(group_col))
+
+mae_rf_sp <- purrr::map_dbl(v_spatial$splits, function(s){
+  tr <- rsample::analysis(s); va <- rsample::assessment(s)
+  fit <- fit_rf(tr); prd <- pred_rf(fit, va); MAE(va[[tgt]], prd)
+})
+pred_mat <- matrix(NA_real_, nrow = nrow(Xt), ncol = length(v_spatial$splits))
+for (k in seq_along(v_spatial$splits)) {
+  tr <- rsample::analysis(v_spatial$splits[[k]])
+  fit <- fit_rf(tr)
+  pred_mat[, k] <- pred_rf(fit, Xt)
 }
+pred_rf_sp_test <- pmax(rowMeans(pred_mat, na.rm = TRUE), 0)
+readr::write_csv(tibble(!!id_name := id_vals, price = round(pred_rf_sp_test)),
+                 "RF_CV_espacial.csv")
 
-mae_cart_sp <- cv_eval(v_spatial, X, fit_cart_1se, pred_cart, tgt) %>% mutate(model = "CART", scheme = "spatial")
-mae_rf_sp   <- cv_eval(v_spatial, X, fit_rf,       pred_rf,   tgt) %>% mutate(model = "RF",   scheme = "spatial")
-
-# -------- 3) Resumen comparativo --------
-mae_all <- bind_rows(mae_cart_reg, mae_rf_reg, mae_cart_sp, mae_rf_sp) %>%
-  group_by(model, scheme) %>%
-  summarise(MAE_mean = mean(mae), MAE_sd = sd(mae), .groups = "drop") %>%
-  arrange(model, scheme)
-
-print(mae_all)
-readr::write_csv(mae_all, "cv_regular_vs_spatial_MAE.csv")
-cat("Archivo guardado: cv_regular_vs_spatial_MAE.csv\n")
+# Tabla comparativa de MAE
+mae_tbl <- tibble::tibble(
+  model   = c("CART","RF","RF"),
+  scheme  = c("estandar","estandar","espacial"),
+  MAE_mean = c(mean(mae_cart_reg), mean(mae_rf_reg), mean(mae_rf_sp)),
+  MAE_sd   = c(stats::sd(mse_cart_reg), stats::sd(mse_rf_reg), stats::sd(mse_rf_sp))
+)
+print(mae_tbl)
+readr::write_csv(mse_tbl, "mae_comparar.csv")
 
 ```
