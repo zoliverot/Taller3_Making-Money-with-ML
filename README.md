@@ -27,7 +27,7 @@ El trabajo cubre todo el ciclo analítico:
 |-------------------------|-----------------------------------------------|
 | `data/`                 | Datos crudos, procesados y externos          |
 | `notebooks/`            | Notebooks `.Rmd` (01 a 07)                   |
-| `origen/`               | Funciones R (config, modelado, visualización)|
+| `origen/`               | Funciones R (config, modelado)               |
 | `outputs/`              | Resultados (gráficos, tablas, predicciones) |
 | `reports/`              | Informe y presentación final                 |
 | `references/`           | Bibliografía y artículos                     |
@@ -46,15 +46,14 @@ install.packages(readLines('requirements_R.txt'))
 | Notebook                     | Descripción                              |
 |-------------------------------|------------------------------------------|
 | `01_data_cleaning.Rmd`        | Limpia los datos crudos                  |
-| `02_feature_engineering.Rmd`  | Crea nuevas variables                     |
-| `03_exploratory_analysis.Rmd` | Análisis descriptivo                      |
-| `04_model_training.Rmd`       | Entrena 7 modelos                         |
-| `05_best_model.Rmd`           | Analiza el mejor modelo                   |
-| `06_spatial_cv.Rmd`           | Evalúa desempeño espacial                  |
-| `07_model_comparison.Rmd`     | Compara todos los resultados              |
+| `02_superlearner.Rmd`         | Crea Superlearner                        |
+| `03_Redes_neuronales.Rmd`     | Creación de Redes Neuronales             |
+| `04_Regresión Lineal.Rmd`     | Creación de Regresiones Lineales         |
+| `05_ElasticNet.Rmd`           | Creación de ElasticNet                   |
+| `06_Boosting.Rmd`             | Crear Modelos Boosting                   |
+| `07_RF y CART.Rmd`            | Modelos Random Forest y CART             |
 
 4. Salidas esperadas
-- Tablas comparativas de RMSE (outputs/tables/)
 - Gráficos y mapas (outputs/figures/)
 - Predicciones Kaggle (outputs/kaggle_submissions/)
 - Informe final (reports/ps3_report.pdf)

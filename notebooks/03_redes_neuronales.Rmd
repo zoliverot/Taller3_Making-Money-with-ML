@@ -1,7 +1,5 @@
 ---
-title: "redes_neuronales"
-author: "Vivian Cabanzo"
-date: "2025-11-20"
+title: "03 - Redes_neuronales"
 output: html_document
 ---
 

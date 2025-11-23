@@ -1,7 +1,5 @@
 ---
-title: "EN"
-author: "Laura Diaz, Vivian Cabanzo, Zeneth Olivero, Cristian Muñoz"
-date: "2025-11-16"
+title: "elasticnet"
 output: html_document
 ---
 
