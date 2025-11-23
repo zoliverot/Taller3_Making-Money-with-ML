@@ -452,6 +452,193 @@ write.csv(
 
 
 ```
+## Versión 2 con CV espacial
+
+```{r}
+set.seed(123)
+
+
+# FILTRAR SOLO APARTAMENTOS
+
+
+train_apto <- train_final %>% 
+  filter(property_type == "Apartamento")
+
+test_apto <- test_final   # test → 94% apartamentos
+
+
+
+#  VARIABLES FACTOR
+
+factors_to_fix <- c("month", "year", "localidad", "estrato")
+
+for (v in factors_to_fix) {
+  if (v %in% names(train_apto)) train_apto[[v]] <- as.factor(train_apto[[v]])
+  if (v %in% names(test_apto))  test_apto[[v]]  <- as.factor(test_apto[[v]])
+}
+
+# Alinear niveles
+for (v in factors_to_fix) {
+  if (!(v %in% names(train_apto)) || !(v %in% names(test_apto))) next
+  
+  lvls <- union(levels(train_apto[[v]]), levels(test_apto[[v]]))
+  train_apto[[v]] <- factor(train_apto[[v]], levels = lvls)
+  test_apto[[v]]  <- factor(test_apto[[v]],  levels = lvls)
+}
+
+
+
+#  AMENIDADES A NUMÉRICO
+
+
+amenities <- c(
+  "has_parqueadero_garaje", "has_seguridad", "has_ascensor", "has_gimnasio",
+  "has_piscina", "has_bbq", "has_zona_infantil", "has_balcon", "has_terraza",
+  "has_patio", "has_jardin_exterior", "has_chimenea", "has_cocina_integral",
+  "has_deposito", "has_estudio", "has_remodelado", "has_vista"
+)
+
+common <- intersect(amenities, names(train_apto))
+
+train_apto[common] <- lapply(train_apto[common], as.numeric)
+test_apto[common]  <- lapply(test_apto[common],  as.numeric)
+
+
+
+#  FÓRMULA
+
+sl_02 <- as.formula(
+  price ~ 
+    surface_total + surface_covered + bedrooms + bathrooms +
+    month + year +
+    has_parqueadero_garaje + has_seguridad + has_ascensor + 
+    has_gimnasio + has_piscina + has_bbq + has_zona_infantil +
+    has_balcon + has_terraza + has_patio + has_jardin_exterior +
+    has_chimenea + has_cocina_integral + has_deposito + 
+    has_estudio + has_remodelado + has_vista +
+    dist_parques + dist_colegios + dist_restaurantes +
+    dist_autopistas + dist_centros_comerciales +
+    localidad + estrato + longitude + latitude
+)
+
+
+
+# 5. RECETA
+
+
+receta_02 <- recipe(sl_02, data = train_apto) %>%
+  
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  
+  step_interact(
+    terms = ~ starts_with("year_") : dist_parques
+  ) %>%
+  
+  step_zv(all_predictors())
+
+prep_receta_02 <- prep(receta_02, training = train_apto, retain = TRUE)
+
+# Matrices finales
+X_train <- bake(prep_receta_02, new_data = train_apto) %>% select(-price)
+y_train <- train_apto$price
+X_test  <- bake(prep_receta_02, new_data = test_apto)
+
+
+
+# SUPERLEARNER — CROSS VALIDATION ESPACIAL POR LOCALIDAD
+
+
+# Crear folds espaciales (cada localidad es un fold)
+localidades <- train_apto$localidad
+unique_locs <- unique(localidades)
+
+fold_indices <- lapply(unique_locs, function(l) {
+  which(localidades == l)
+})
+
+cv_control <- list(
+  V = length(fold_indices),
+  validRows = fold_indices
+)
+
+# Librerías base
+mix <- c(
+  "SL.lm",
+  "SL.ranger",
+  "SL.mean"
+)
+
+# Entrenar SuperLearner con CV espacial
+sl_02 <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_control
+)
+
+
+
+#  PREDECIR EN TEST Y EXPORTAR
+
+test_02 <- predict(sl_02, newdata = as.data.frame(X_test))$pred
+test_02 <- pmax(test_02, 1)
+
+output_02 <- test_apto %>%
+  select(property_id) %>%
+  mutate(price = test_02)
+
+write.csv(
+  output_02,
+  here("outputs", "kaggle_submissions", "sl_ranger_lm_espacial.csv"),
+  row.names = FALSE
+)
+
+```
+## Comparación entre versión 1 y 2 de superlearner lm - random forest
+```{r}
+# MAE del SuperLearner bajo CV ESPACIAL
+mae_sl_espacial <- mean(abs(sl_02$SL.predict - y_train))
+mae_sl_espacial
+
+
+# MAE del superlearner con CV normal
+set.seed(123)
+
+N <- nrow(train_apto)
+K <- 5
+
+fold_indices_random <- split(sample(1:N), rep(1:K, length.out = N))
+
+cv_random <- list(
+  V = K,
+  validRows = fold_indices_random
+)
+
+sl_random <- SuperLearner(
+  Y = y_train,
+  X = as.data.frame(X_train),
+  SL.library = mix,
+  method = "method.NNLS",
+  family = gaussian(),
+  cvControl = cv_random
+)
+
+mae_sl_random <- mean(abs(sl_02$SL.predict - y_train))
+mae_sl_random
+
+
+comparativo_sl_02 <- tibble(
+  Modelo = c("SuperLearner CV normal", "SuperLearner CV espacial"),
+  MAE = c(mae_sl_normal, mae_sl_espacial)
+)
+
+comparativo_sl_02
+
+
+```
+
 
 ## Superlearner ranger - glmnet y xgboost
 
