@@ -1,0 +1,597 @@
+---
+title: "EN"
+author: "Laura Diaz, Vivian Cabanzo, Zeneth Olivero, Cristian Muñoz"
+date: "2025-11-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Cargar librerias
+```{r}
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels
+)
+```
+
+Cargar bases finales
+```{r}
+testEN <- read_csv("C:/Users/laura/OneDrive/Documentos/GitHub/Taller3_Making-Money-with-ML/data/processed/test_final.csv")
+trainEN <- read_csv("C:/Users/laura/OneDrive/Documentos/GitHub/Taller3_Making-Money-with-ML/data/processed/train_final.csv")
+```
+
+preparar datasets de test y train para modelar
+```{r}
+library(dplyr)
+
+
+# ================================
+# 1. PREPARAR DATASETS BASE
+# ================================
+
+train_modelo_EN <- trainEN %>% 
+  select(-property_id, -title, -description, -city, -operation_type,
+         -has_pisos_vivienda, -has_cocina_integral, -has_salon_social, -barrio, -rooms)
+
+test_modelo_EN <- testEN %>% 
+  select(-property_id, -title, -description, -city, -operation_type,
+         -has_pisos_vivienda, -has_cocina_integral, -has_salon_social, -barrio, -rooms, -price)
+
+```
+
+
+Convertir a factor variables que aparecen en Character y tratamiento de NA
+```{r}
+# ========================================
+# CORRECCIÓN DE VARIABLES CATEGÓRICAS
+# ========================================
+
+# Columnas categóricas problemáticas
+factores <- c("localidad", "property_type")
+
+# 1. Convertir estas columnas a carácter para controlar niveles manualmente
+train_modelo_EN[factores] <- lapply(train_modelo_EN[factores], as.character)
+test_modelo_EN[factores]  <- lapply(test_modelo_EN[factores], as.character)
+
+# 2. Reemplazar NA por "OTRO" en ambas bases
+for (col in factores) {
+  train_modelo_EN[[col]][is.na(train_modelo_EN[[col]])] <- "OTRO"
+  test_modelo_EN[[col]][is.na(test_modelo_EN[[col]])]   <- "OTRO"
+}
+
+# 3. Unificar todos los niveles posibles entre train y test
+for (col in factores) {
+  niveles_totales <- union(unique(train_modelo_EN[[col]]),
+                           unique(test_modelo_EN[[col]]))
+  
+  train_modelo_EN[[col]] <- factor(train_modelo_EN[[col]], levels = niveles_totales)
+  test_modelo_EN[[col]]  <- factor(test_modelo_EN[[col]],  levels = niveles_totales)
+}
+
+
+```
+
+
+# ELASTIC NET 1
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+
+# --- Log del target ---
+train22 <- train22 %>% mutate(price_log = log(price))
+
+# --- Recipe final ---
+rec_en <- recipe(price_log ~ ., data = train22) %>%
+  update_role(property_id, new_role = "ID") %>%
+  step_rm(property_id, title, description) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+# --- Modelo final con hiperparámetros encontrados ---
+final_en <- linear_reg(
+  mode = "regression",
+  penalty = 1e-04,       # lambda óptimo
+  mixture = 0.1111111    # alpha óptimo
+) %>% 
+  set_engine("glmnet")
+
+wf_final <- workflow() %>%
+  add_recipe(rec_en) %>%
+  add_model(final_en)
+
+# --- Entrenar modelo final ---
+set.seed(123)
+fit_en <- wf_final %>% fit(data = train22)
+
+# --- Predecir en test ---
+pred_log <- predict(fit_en, test22)
+
+# Volver del log al precio ---
+pred_price <- exp(pred_log$.pred)
+
+# Redondear a entero ---
+pred_price <- round(pred_price)
+
+# --- Construir submission ---
+submission <- tibble(
+  property_id = test$property_id,
+  price = pred_price
+)
+
+# --- Guardar CSV para Kaggle ---
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
+
+file_name <- paste0(
+  "ElasticNet_final_lambda_1e-04_alpha_0.1111_", 
+  timestamp, ".csv"
+)
+
+write_csv(submission, file_name)
+
+cat("Archivo guardado correctamente como:\n", file_name, "\n")
+
+```
+
+
+# ELASTIC NET 2
+
+
+
+Definir variable objetivo
+```{r}
+library(glmnet)
+
+y_train <- train_modelo_EN$price
+X_train <- train_modelo_EN %>% select(-price)
+X_test  <- test_modelo_EN
+
+```
+
+Definir las matrices del modelo
+```{r}
+X_train <- train_modelo_EN %>% select(-price)
+X_test  <- test_modelo_EN
+
+X_train_mm <- model.matrix(~ ., data = X_train)[, -1]
+X_test_mm  <- model.matrix(~ ., data = X_test)[, -1]
+
+#Verificar la filas de las matrices
+nrow(X_train_mm)
+length(train_modelo_EN$price)
+
+nrow(X_test_mm)
+```
+
+Entrenamiento del modelo y validación cruzada
+```{r}
+library(glmnet)
+
+set.seed(123)
+
+cv_en <- cv.glmnet(
+  x = X_train_mm,
+  y = train_modelo_EN$price,
+  alpha = 0.5,
+  nfolds = 10,
+  family = "gaussian",
+  standardize = TRUE
+)
+
+# Mejor lambda
+cv_en$lambda.min
+
+# Predicción en test
+pred_en <- predict(cv_en, newx = X_test_mm)
+
+# Mostrar primeros valores
+head(pred_en)
+
+```
+lambda.min es el que minimiza el error de validación, según cross‐validation,
+es decir, el que minimiza el error (MSE) del modelo.
+
+Verificar predicciones internas en train
+```{r}
+# Predicciones internas del CV usando lambda.min
+pred_cv <- predict(cv_en, newx = X_train_mm, s = "lambda.min")
+
+# Calcular MAE
+MAE <- mean(abs(pred_cv - train_modelo_EN$price))
+MAE
+```
+```{r}
+pred_en <- predict(cv_en, newx = X_test_mm, s = "lambda.min")
+head(pred_en)
+
+```
+
+
+Exportar predicciones a CSV
+```{r}
+# ======================================
+# 1. Definir versión del modelo
+# ======================================
+version_model <- "v2"   
+
+# ======================================
+# 2. Extraer lambda y alpha
+# ======================================
+lambda_best <- cv_en$lambda.min
+alpha_best  <- 0.5   # valor fijo de tu modelo
+
+# Convertir valores a cadenas seguras
+lambda_str <- gsub("\\.", "_", format(round(lambda_best, 4), scientific = FALSE))
+alpha_str  <- gsub("\\.", "_", format(alpha_best, scientific = FALSE))
+
+# ======================================
+# 3. Calcular MAE interno del modelo
+# ======================================
+pred_cv <- predict(cv_en, newx = X_train_mm, s = "lambda.min")
+MAE <- mean(abs(pred_cv - train_modelo_EN$price))
+
+# Convertir MAE a string seguro
+mae_str <- gsub("\\.", "_", format(round(MAE), scientific = FALSE))
+
+# ======================================
+# 4. Construir etiqueta de archivo (sin timestamp)
+# ======================================
+file_tag <- paste0(
+  "ElasticNet_", version_model,
+  "_lambda_", lambda_str,
+  "_alpha_", alpha_str,
+  "_MAE_", mae_str
+)
+
+file_name <- paste0(file_tag, ".csv")
+
+# ======================================
+# 5. Definir ruta de salida (desde /notebooks/)
+# ======================================
+ruta_salida <- "../outputs/kaggle_submissions/"
+
+# Crear carpeta si no existe
+if (!dir.exists(ruta_salida)) {
+  dir.create(ruta_salida, recursive = TRUE)
+}
+
+# ======================================
+# 6. Armar submission Kaggle
+# ======================================
+submission <- data.frame(
+  property_id = testEN$property_id,
+  price = as.numeric(pred_en[, 1])
+)
+
+# ======================================
+# 7. Guardar archivo en carpeta correcta
+# ======================================
+write.csv(
+  submission,
+  paste0(ruta_salida, file_name),
+  row.names = FALSE
+)
+
+# ======================================
+# 8. Mensaje final
+# ======================================
+cat("Archivo Kaggle generado exitosamente en:\n")
+cat(" → ", paste0(ruta_salida, file_name), "\n")
+
+```
+
+# ELASTIC NET 3
+
+```{r}
+library(tidymodels)
+library(glmnet)
+
+# ======================================================
+# 1. Preparar datos (log del target)
+# ======================================================
+trainEN2 <- train_modelo_EN %>%
+  mutate(price_log = log(price)) %>%
+  select(-price)
+
+# ======================================================
+# 2. Recipe para Elastic Net
+# ======================================================
+rec_en <- recipe(price_log ~ ., data = trainEN2) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+
+# ======================================================
+# 3. Modelo Elastic Net (tunable)
+# ======================================================
+mod_en <- linear_reg(
+  mode = "regression",
+  penalty = tune(),     # lambda
+  mixture = tune()      # alpha
+) %>%
+  set_engine("glmnet")
+
+# ======================================================
+# 4. Workflow
+# ======================================================
+wf_en <- workflow() %>%
+  add_recipe(rec_en) %>%
+  add_model(mod_en)
+
+# ======================================================
+# 5. Grid de hiperparámetros
+# ======================================================
+grid_en <- grid_regular(
+  penalty(range = c(-4, 0)),   # lambda: 1e-4 a 1
+  mixture(range = c(0, 1)),    # alpha: 0 a 1
+  levels = 6                   # 6x6 = 36 combinaciones
+)
+
+# ======================================================
+# 6. Validación cruzada
+# ======================================================
+set.seed(123)
+folds_en <- vfold_cv(trainEN2, v = 5)
+
+# ======================================================
+# 7. Entrenamiento (tuning)
+# ======================================================
+set.seed(123)
+tuning_en <- tune_grid(
+  wf_en,
+  resamples = folds_en,
+  grid = grid_en,
+  metrics = metric_set(rmse, mae)
+)
+
+# ======================================================
+# 8. Seleccionar el mejor modelo (por RMSE)
+# ======================================================
+best_en <- select_best(tuning_en, metric = "rmse")
+
+best_en
+
+```
+```{r}
+# 9. Modelo final con los hiperparámetros óptimos
+final_en <- finalize_workflow(wf_en, best_en)
+
+# Entrenar en todo el train
+fit_en <- fit(final_en, data = trainEN2)
+
+# ======================================================
+# 10. Predecir sobre test
+# ======================================================
+pred_log <- predict(fit_en, test_modelo_EN)
+
+# Volver al espacio original
+pred_price <- exp(pred_log$.pred)
+
+# Redondear
+pred_price <- round(pred_price)
+
+# Submission final
+submission <- data.frame(
+  property_id = testEN$property_id,
+  price = pred_price
+)
+
+```
+```{r}
+# Predicciones internas del modelo final (en log)
+pred_train_log <- predict(fit_en, train_modelo_EN)
+
+# Volver al espacio original
+pred_train_price <- exp(pred_train_log$.pred)
+
+# MAE real
+MAE_real <- mean(abs(pred_train_price - train_modelo_EN$price))
+MAE_real
+
+```
+
+```{r}
+# ======================================================
+# 1. Versión del modelo
+# ======================================================
+version_model <- "v4_LOG"
+
+# ======================================================
+# 2. Ruta donde guardar archivo
+# ======================================================
+ruta_salida <- "../outputs/kaggle_submissions/"
+
+# ======================================================
+# 3. Extraer valores del mejor modelo
+# ======================================================
+lambda_best <- best_en$penalty
+alpha_best  <- best_en$mixture
+
+# Convertir a strings seguros
+lambda_str <- gsub("\\.", "_", format(lambda_best, scientific = FALSE))
+alpha_str  <- gsub("\\.", "_", format(alpha_best, scientific = FALSE))
+
+# ======================================================
+# 4. Convertir MAE a string seguro
+# ======================================================
+mae_str <- gsub("\\.", "_", format(round(MAE_real), scientific = FALSE))
+
+# ======================================================
+# 5. Construir nombre del archivo
+# ======================================================
+file_name <- paste0(
+  "ElasticNet_", version_model,
+  "_lambda_", lambda_str,
+  "_alpha_", alpha_str,
+  "_MAE_", mae_str,
+  ".csv"
+)
+
+# ======================================================
+# 6. Guardar submission
+# ======================================================
+write.csv(submission, paste0(ruta_salida, file_name), row.names = FALSE)
+
+# ======================================================
+# 7. Confirmación
+# ======================================================
+cat("Archivo guardado exitosamente:\n")
+cat("→ ", paste0(ruta_salida, file_name), "\n")
+
+```
+
+# ELASTIC NET 4
+```{r}
+library(tidymodels)
+library(glmnet)
+
+# ======================================================
+# 1. Preparar datos: crear log del precio
+# ======================================================
+trainEN2 <- train_modelo_EN %>%
+  mutate(price_log = log(price)) %>%
+  select(-price)
+
+testEN2 <- test_modelo_EN   # test sin la variable price_log
+
+
+# ======================================================
+# 2. Recipe para Elastic Net (NO usa price_log como predictor)
+# ======================================================
+rec_en <- recipe(price_log ~ ., data = trainEN2) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+
+# ======================================================
+# 3. Modelo Elastic Net 
+# ======================================================
+mod_en <- linear_reg(
+  mode = "regression",
+  penalty = tune(),
+  mixture = tune()
+) %>% 
+  set_engine("glmnet")
+
+
+# ======================================================
+# 4. Workflow
+# ======================================================
+wf_en <- workflow() %>%
+  add_recipe(rec_en) %>%
+  add_model(mod_en)
+
+
+# ======================================================
+# 5. Grid de hiperparámetros
+# ======================================================
+grid_en <- grid_regular(
+  penalty(range = c(-4, 0)),   # λ: 1e-4 a 1
+  mixture(range = c(0, 1)),    # α: 0 a 1
+  levels = 6
+)
+
+
+# ======================================================
+# 6. Validación cruzada
+# ======================================================
+set.seed(123)
+folds_en <- vfold_cv(trainEN2, v = 5)
+
+
+# ======================================================
+# 7. Entrenamiento (tuning)
+# ======================================================
+set.seed(123)
+tuning_en <- tune_grid(
+  wf_en,
+  resamples = folds_en,
+  grid = grid_en,
+  metrics = metric_set(rmse, mae)
+)
+
+
+# ======================================================
+# 8. Seleccionar mejor modelo
+# ======================================================
+best_en <- select_best(tuning_en, metric = "rmse")
+best_en
+
+
+# ======================================================
+# 9. Entrenar modelo final con todos los datos
+# ======================================================
+final_en <- finalize_workflow(wf_en, best_en)
+
+fit_en <- fit(final_en, data = trainEN2)
+
+
+# ======================================================
+# 10. Predicción sobre TEST
+# ======================================================
+pred_log <- predict(fit_en, testEN2)
+
+pred_price <- exp(pred_log$.pred)
+pred_price <- round(pred_price)
+
+
+# ======================================================
+# 11. Crear submission Kaggle
+# ======================================================
+submission <- data.frame(
+  property_id = testEN$property_id,
+  price = pred_price
+)
+
+
+# ======================================================
+# 12. MAE interno del modelo final (en train)
+# ======================================================
+pred_train_log <- predict(fit_en, trainEN2)
+pred_train_price <- exp(pred_train_log$.pred)
+
+MAE_real <- mean(abs(pred_train_price - train_modelo_EN$price))
+MAE_real
+
+```
+
+```{r}
+# ======================================================
+# GUARDAR SUBMISSION EN LA CARPETA DEL PROYECTO
+# ======================================================
+
+# Ruta donde quieres guardar el archivo
+ruta_salida <- "../outputs/kaggle_submissions/"
+
+# Crear nombre del archivo usando métricas reales
+file_name <- paste0(
+  "ElasticNet_v4_LOG_lambda_", gsub("\\.", "_", best_en$penalty),
+  "_alpha_", gsub("\\.", "_", best_en$mixture),
+  "_MAE_", format(round(MAE_real), scientific = FALSE),
+  ".csv"
+)
+
+# Guardar
+write.csv(submission, paste0(ruta_salida, file_name), row.names = FALSE)
+
+cat("Archivo guardado exitosamente en:\n")
+cat(paste0(ruta_salida, file_name), "\n")
+
+```
+
