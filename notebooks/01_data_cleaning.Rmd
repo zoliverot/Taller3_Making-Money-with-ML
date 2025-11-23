@@ -1213,9 +1213,8 @@ library(recipes)
 library(tidymodels)
 library(stringr)
 
-# ======================================================
-# Conversor palabras → números
-# ======================================================
+# Conversor palabras a números
+
 
 word_to_num <- function(x) {
   dic <- c(
@@ -1225,29 +1224,29 @@ word_to_num <- function(x) {
   dic[x]
 }
 
-# ======================================================
+
 # Función general de extracción
 #  Detecta "35 baños" → 3.5 → 4
 #  Detecta "1002 banos" → 2
 #  Maneja "baño y medio" → 1.5 → 2
 #  Maneja decimales "1.5 baños" → 2
-# ======================================================
+
 extract_count <- function(text, num_regex, word_regex, base_words) {
 
   txt <- tolower(text)
 
-  # =====================================================
-  # 0) DECIMALES tipo "1.5 baños"
-  # =====================================================
+
+  #  DECIMALES tipo "1.5 baños"
+
   frac_num <- str_match(txt, "(\\d+\\.\\d)\\s*(baños|banos|baño|bano|bao|baos|wc)")
   if (!is.na(frac_num[1])) {
     val <- as.numeric(frac_num[2])
     return(round(val))
   }
 
-  # =====================================================
-  # 1) Dos dígitos "35 baños" → 3.5
-  # =====================================================
+
+  # Dos dígitos "35 baños" → 3.5
+
   two_digit <- str_match(txt, "\\b(\\d{2})\\s*(baños|banos|baño|bano|bao|baos|wc)")
   if (!is.na(two_digit[1])) {
     num <- as.numeric(two_digit[2])
@@ -1255,18 +1254,18 @@ extract_count <- function(text, num_regex, word_regex, base_words) {
     return(round(val))
   }
 
-  # =====================================================
-  # 2) "1002 baños" → 2
-  # =====================================================
+
+  #  "1002 baños" → 2
+
   big_fix <- str_match(txt, "\\b(\\d{3,4})\\s*(baños|banos|baño|bano|bao|baos|wc)")
   if (!is.na(big_fix[1])) {
     last <- as.numeric(substr(big_fix[2], nchar(big_fix[2]), nchar(big_fix[2])))
     if (last %in% 1:9) return(last)
   }
 
-  # =====================================================
-  # 3) "1 baño y medio" / "dos baños y medio"
-  # =====================================================
+
+  # "1 baño y medio" / "dos baños y medio"
+
   half_num <- str_match(txt, "(\\d+)\\s*(baños|banos|baño|bano|bao|baos|wc)\\s*y\\s*medio")
   if (!is.na(half_num[1])) return(round(as.numeric(half_num[2]) + 0.5))
 
@@ -1304,9 +1303,9 @@ extract_count <- function(text, num_regex, word_regex, base_words) {
 
   if (length(vals) > 0) return(max(vals))
 
-  # =====================================================
-  # 6) Si aparece la palabra base → 1
-  # =====================================================
+
+  #  Si aparece la palabra base → 1
+
   if (str_detect(txt, paste0("\\b(", paste(base_words, collapse="|"), ")\\b")))
     return(1)
 
@@ -1314,9 +1313,9 @@ extract_count <- function(text, num_regex, word_regex, base_words) {
 }
   
 
-# ======================================================
+
 # EXTRACTOR CORRECTO SOLO PARA ÁREA
-# ======================================================
+
 extract_area <- function(text) {
 
   txt <- tolower(text)
@@ -1353,9 +1352,9 @@ extract_area <- function(text) {
   return(max(clean_vals))
 } 
 
-# ======================================================
+
 # Función principal
-# ======================================================
+
 extract_from_text <- function(text) {
 
   text <- ifelse(is.na(text), "", text)
