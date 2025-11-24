@@ -1,0 +1,392 @@
+---
+title: "Estadisticas descriptivas"
+author: "Laura Diaz"
+date: "2025-11-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels
+)
+
+```
+
+
+Cargar bases iniciales
+```{r}
+train <- read_csv("../data/train.csv")
+test <- read_csv("../data/test.csv")
+
+```
+```{r}
+colnames(test)
+```
+```{r}
+colnames(train)
+
+```
+
+Cargar bases finales
+```{r}
+train_final <- read_csv("../data/processed/train_final.csv")
+test_final <- read_csv("../data/processed/test_final.csv")
+
+```
+
+Registros eliminados
+```{r}
+elim <- 38644 - 32073
+elim1 <- 38644 - (1731 + 4426 + 414)
+total <- (6571/38644)*100
+
+```
+
+
+
+
+```{r}
+colnames(test_final)
+```
+```{r}
+colnames(train_final)
+
+```
+```{r}
+#Variables que están en train pero no en test:
+setdiff(names(train_final), names(test_final))
+#Variables que están en test pero no en train:
+setdiff(names(test_final), names(train_final))
+```
+```{r}
+library(dplyr)
+
+# Obtener clases de cada dataset
+classes_train_f <- data.frame(
+  variable = names(train_final),
+  class_train = sapply(train_final, class)
+)
+
+classes_test_f <- data.frame(
+  variable = names(test_final),
+  class_test = sapply(test_final, class)
+)
+
+# Unir tablas
+class_compare_f <- classes_train_f %>%
+  left_join(classes_test_f, by = "variable")
+
+class_compare_f
+
+knitr::kable(
+  class_compare_f,
+  caption = "Comparación de clases de variables entre train y test"
+)
+
+```
+```{r}
+library(dplyr)
+library(knitr)
+
+# Función para calcular NA y %
+missing_summary_f <- function(df) {
+  data.frame(
+    variable = names(df),
+    n_na = colSums(is.na(df)),
+    pct_na = round(colMeans(is.na(df)) * 100, 2)
+  )
+}
+
+# Resumen train y test
+miss_train_f <- missing_summary_f(train_final)
+miss_test_f  <- missing_summary_f(test_final)
+
+# Unir y ordenar por NA de train
+missing_table_f <- miss_train_f %>%
+  rename(n_na_train = n_na,
+         pct_na_train = pct_na) %>%
+  left_join(
+    miss_test_f %>% rename(n_na_test = n_na,
+                         pct_na_test = pct_na),
+    by = "variable"
+  ) %>%
+  arrange(desc(n_na_train))   # <<--- ORDENAR DE MAYOR A MENOR
+
+# Mostrar tabla
+kable(
+  missing_table_f,
+  caption = "Cantidad y porcentaje de valores faltantes por variable en train y test",
+  align = "lrrrr"
+)
+
+```
+
+ESTADISTICAS DESCRIPTIVAS
+
+```{r}
+# ============================================================
+# 0) Crear carpetas de salida
+# ============================================================
+dir.create("outputs", showWarnings = FALSE)
+dir.create("outputs/figures", showWarnings = FALSE)
+
+
+# ============================================================
+# 1) Definir variable objetivo
+# ============================================================
+target <- "price"
+
+
+# ============================================================
+# 2) Definición de columnas numéricas (no binarias, sin month/lat/lon)
+# ============================================================
+num_cols <- train_final %>%
+  select(
+    where(is.numeric) &
+      where(~ length(unique(., na.rm = TRUE)) > 2)  # no binarias
+  ) %>%
+  select(-month, -latitude, -longitude) %>%          # excluir manualmente
+  colnames()
+
+# Quitar target si aparece accidentalmente
+num_cols <- setdiff(num_cols, target)
+
+
+# ============================================================
+# 3) Definición de columnas categóricas
+# ============================================================
+cat_cols <- train_final %>% 
+  select(
+    where(is.factor) | where(is.character)
+  ) %>%
+  select(-title, -description, -barrio, -operation_type, -city, -property_id) %>%
+  colnames()
+
+cat("\nColumnas numéricas:\n")
+print(num_cols)
+
+cat("\nColumnas categóricas:\n")
+print(cat_cols)
+
+
+# ============================================================
+# 4) Función auxiliar para guardar PDF y PNG en outputs/figures
+# ============================================================
+save_plot <- function(plot, filename, width = 10, height = 8) {
+
+  pdf_path <- file.path("outputs/figures", paste0(filename, ".pdf"))
+  png_path <- file.path("outputs/figures", paste0(filename, ".png"))
+
+  # Guardar PDF
+  ggsave(
+    pdf_path,
+    plot = plot,
+    device = "pdf",
+    width = width, height = height, dpi = 300
+  )
+
+  # Guardar PNG
+  ggsave(
+    png_path,
+    plot = plot,
+    device = "png",
+    width = width, height = height, dpi = 300
+  )
+}
+
+
+# ============================================================
+# 5) Histogramas — exportación PDF + PNG
+# ============================================================
+if (length(num_cols) > 0) {
+
+  p_hist <- train_final %>%
+    select(all_of(num_cols)) %>%
+    tidyr::pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
+    ggplot(aes(x = valor)) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+    facet_wrap(~ variable, scales = "free", ncol = 3) +
+    labs(
+      title = "Histogramas de variables numéricas de la base de entrenamiento",
+      x = NULL,
+      y = "Frecuencia"
+    ) +
+    theme_minimal()
+
+  print(p_hist)
+
+  # Guardar ambos formatos
+  save_plot(p_hist, "histogramas_train")
+}
+
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(forcats)
+
+# ============================================================
+# 0) Crear carpetas de salida
+# ============================================================
+dir.create("outputs", showWarnings = FALSE)
+dir.create("outputs/figures", showWarnings = FALSE)
+
+# ============================================================
+# Seleccionar dos categóricas
+# ============================================================
+box_cat1 <- "property_type"
+box_cat2 <- "localidad"
+
+# Función de top-k niveles
+top_k_levels <- function(x, k = 12) {
+  forcats::fct_lump_n(x, n = k, other_level = "otros")
+}
+
+# ============================================================
+# 1. Gráfico de densidad
+# ============================================================
+p_dens <- ggplot(train_final, aes(x = price)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  labs(title = "Densidad de price (TRAIN)", x = "price", y = "Densidad") +
+  theme_minimal() +
+  theme(plot.margin = margin(t = 20, r = 10, b = 10, l = 10))
+
+# ============================================================
+# 2. Gráfico de densidad log
+# ============================================================
+p_dens_log <- ggplot(train_final %>% filter(price > 0),
+                     aes(x = log1p(price))) +
+  geom_density(fill = "darkgreen", alpha = 0.5) +
+  labs(title = "Densidad log1p(price) (TRAIN)",
+       x = "log1p(price)", y = "Densidad") +
+  theme_minimal() +
+  theme(plot.margin = margin(t = 20, r = 10, b = 10, l = 10))
+
+# ============================================================
+# 3. Boxplot categórica 1
+# ============================================================
+p_box1 <- train_final %>%
+  mutate(grp = top_k_levels(.data[[box_cat1]])) %>%
+  ggplot(aes(x = grp, y = price)) +
+  geom_boxplot(outlier.alpha = 0.2, fill = "orange") +
+  coord_flip() +
+  labs(title = paste("Boxplot de price por", box_cat1, "(TRAIN)"),
+       x = box_cat1, y = "price") +
+  theme_minimal() +
+  theme(plot.margin = margin(t = 30, r = 10, b = 10, l = 10))
+
+# ============================================================
+# 4. Boxplot categórica 2
+# ============================================================
+p_box2 <- train_final %>%
+  mutate(grp = top_k_levels(.data[[box_cat2]])) %>%
+  ggplot(aes(x = grp, y = price)) +
+  geom_boxplot(outlier.alpha = 0.2, fill = "orange") +
+  coord_flip() +
+  labs(title = paste("Boxplot de price por", box_cat2, "(TRAIN)"),
+       x = box_cat2, y = "price") +
+  theme_minimal() +
+  theme(plot.margin = margin(t = 30, r = 10, b = 10, l = 10))
+
+# ============================================================
+# 5. Collage EXACTO 2×2
+# ============================================================
+combo_2x2 <- (p_dens | p_dens_log) /
+             (p_box1 | p_box2)
+
+print(combo_2x2)
+
+# ============================================================
+# 6. Guardar en outputs/figures — PDF + PNG
+# ============================================================
+ggsave(
+  filename = "outputs/figures/graficos_target_2x2.pdf",
+  plot = combo_2x2,
+  device = "pdf",
+  width = 14, height = 14, dpi = 300
+)
+
+ggsave(
+  filename = "outputs/figures/graficos_target_2x2.png",
+  plot = combo_2x2,
+  device = "png",
+  width = 14, height = 14, dpi = 300
+)
+
+
+```
+
+```{r}
+# Variables específicas a calcular
+vars_interes <- c("bathrooms", "bedrooms", "rooms", "price", "surface_total")
+
+# Calcular medias sin notación científica
+medias_especificas <- train_final %>%
+  select(all_of(vars_interes)) %>%
+  summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "media") %>%
+  mutate(media = formatC(media, format = "f", digits = 2))
+
+medias_especificas
+
+```
+```{r}
+# Extraer variable
+x <- train_final$surface_total
+
+# Q1, Q3 e IQR
+Q1 <- quantile(x, 0.25, na.rm = TRUE)
+Q3 <- quantile(x, 0.75, na.rm = TRUE)
+IQR_value <- IQR(x, na.rm = TRUE)
+
+# Límites para detectar outliers
+lower <- Q1 - 1.5 * IQR_value
+upper <- Q3 + 1.5 * IQR_value
+
+# Filtrar valores dentro del rango permitido
+x_filtrado <- x[x >= lower & x <= upper]
+
+# Media original y media sin atípicos
+media_original <- mean(x, na.rm = TRUE)
+media_sin_atipicos <- mean(x_filtrado, na.rm = TRUE)
+
+media_original
+media_sin_atipicos
+
+```
+```{r}
+# Variable original
+x <- train_final$surface_total
+
+# Calcular Q1, Q3 e IQR
+Q1 <- quantile(x, 0.25, na.rm = TRUE)
+Q3 <- quantile(x, 0.75, na.rm = TRUE)
+IQR_value <- IQR(x, na.rm = TRUE)
+
+# Límites de Tukey
+lower <- Q1 - 1.5 * IQR_value
+upper <- Q3 + 1.5 * IQR_value
+
+# Filtrar datos dentro del rango
+x_filtrado <- x[x >= lower & x <= upper]
+
+# Calcular mediana sin atípicos
+mediana_sin_atipicos <- median(x_filtrado, na.rm = TRUE)
+
+mediana_sin_atipicos
+
+```
+
