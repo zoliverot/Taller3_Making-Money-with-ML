@@ -23,95 +23,82 @@ pacman::p_load(dplyr, rpart, readr, tibble, purrr, forcats, tidyverse, readr, ja
 
 ```{r}
 #Bases de datos
-train_ruta <- "C:/Users/crist/Downloads/datos/train_final.csv"
-test_ruta <- "C:/Users/crist/Downloads/datos/train_final.csv"
-test <- readr::read.csv(test_ruta, locale(encoding = "UTF-8"))
-train <- read::read.csv(test_ruta, locale(encoding = "UTF-8"))
+#Bases de datos 
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_final  <- readRDS(here::here("data", "processed", "test_final.rds"))
+
+# Copias originales
+train_original <- train_final
+test_original  <- test_final
+
+# Asignar datasets de trabajo para el pipeline
+train <- train_final
+test  <- test_final
+
+
 ```
 
 
 ```{r}
 # RF Y CART
-target  <- if ("price" %in% names(train)) "price" else stop("No encuentro 'price' en train.")
-id_col  <- if ("property_id" %in% names(train)) "property_id" else NULL
-
+target <- if ("price" %in% names(train)) "price" else stop("No encuentro 'price' en train.") 
+id_col <- if ("property_id" %in% names(train)) "property_id" else NULL
 # Forzar factores planificados
 fac_cols <- intersect(c("month","year","localidad","estrato"), names(train))
 train <- train %>% mutate(across(all_of(fac_cols), ~as.factor(.)))
-test  <- test  %>% mutate(across(all_of(fac_cols), ~as.factor(.)))
-
+test <- test %>% mutate(across(all_of(fac_cols), ~as.factor(.))) 
 # Alinear niveles de factores entre train y test
-align_levels <- function(tr, te, cols){
-  for (c in cols) {
-    lvls <- union(levels(tr[[c]]), levels(te[[c]]))
-    tr[[c]] <- factor(tr[[c]], levels = lvls)
-    te[[c]] <- factor(te[[c]], levels = lvls)
-  }
-  list(train=tr, test=te)
-}
-tmp <- align_levels(train, test, fac_cols)
-train <- tmp$train; test <- tmp$test
-
+align_levels <- function(tr, te, cols)
+  { for (c in cols) { 
+    lvls <- union(levels(tr[[c]]), levels(te[[c]])) 
+tr[[c]] <- factor(tr[[c]], levels = lvls) 
+te[[c]] <- factor(te[[c]], levels = lvls) } 
+  list(train=tr, test=te) }
+tmp <- align_levels(train, test, fac_cols) 
+train <- tmp$train; test <- tmp$test 
 # codificar dummies
-binary_vars <- intersect(c(
-  "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina",
-  "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio",
-  "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito",
-  "has_estudio","has_remodelado","has_vista"
-), names(train))
+binary_vars <- intersect(c( "has_parqueadero_garaje","has_seguridad","has_ascensor","has_gimnasio","has_piscina", "has_bbq","has_zona_infantil","has_balcon","has_terraza","has_patio", "has_jardin_exterior","has_chimenea","has_cocina_integral","has_deposito", "has_estudio","has_remodelado","has_vista" ), names(train))
 
-to01 <- function(x){
-  if (is.factor(x)) x <- as.character(x)
-  if (is.character(x)) {
-    x <- tolower(trimws(x))
-    return(as.integer(x %in% c("1","si","sí","true","t","y","yes","s","present","presente")))
-  }
-  if (is.logical(x)) return(as.integer(x))
-  if (is.numeric(x)) return(as.integer(ifelse(is.na(x), NA, x != 0)))
-  return(as.integer(!is.na(x) & x != 0))
-}
+to01 <- function(x)
+  { if (is.factor(x))
+    x <- as.character(x)
+  if (is.character(x)) 
+    { x <- tolower(trimws(x)) 
+    return(as.integer(x %in% c("1","si","sí","true","t","y","yes","s","present","presente"))) }
 
-train <- train %>% mutate(across(all_of(binary_vars), to01))
-test  <- test  %>% mutate(across(all_of(binary_vars),  to01))
+if (is.logical(x)) return(as.integer(x)) 
+if (is.numeric(x)) return(as.integer(ifelse(is.na(x), NA, x != 0)))
+return(as.integer(!is.na(x) & x != 0)) } 
 
-# Reemplazar NA en dummies por 0
+train <- train %>% mutate(across(all_of(binary_vars), to01)) 
+test <- test %>% mutate(across(all_of(binary_vars), to01))
+# Reemplazar NA en dummies por 0 
 train <- train %>% mutate(across(all_of(binary_vars), ~replace_na(., 0L)))
-test  <- test  %>% mutate(across(all_of(binary_vars),  ~replace_na(., 0L)))
-
+test <- test %>% mutate(across(all_of(binary_vars), ~replace_na(., 0L))) 
 # Remover columnas indeseadas si existen
-vars_remove <- intersect(c("has_pisos_vivienda","has_salon_social"), names(train))
+vars_remove <- intersect(c("has_pisos_vivienda","has_salon_social"), names(train)) 
 train <- train %>% select(-all_of(vars_remove))
-test  <- test  %>% select(-all_of(vars_remove))
-
-# Remover texto crudo
+test <- test %>% select(-all_of(vars_remove)) 
+# Remover texto crudo 
 txt_to_rm <- intersect(c("title","description"), names(train))
-train <- train %>% select(-all_of(txt_to_rm))
-test  <- test  %>% select(-all_of(txt_to_rm))
-
-# Eliminar columnas de varianza cero
-rec_zv <- recipe(as.formula(paste(target, "~ .")), data = train) %>%
-  update_role(any_of(id_col), new_role = "id") %>%
-  step_zv(all_predictors())
-
+train <- train %>% select(-all_of(txt_to_rm)) 
+test <- test %>% select(-all_of(txt_to_rm))
+# Eliminar columnas de varianza cero 
+rec_zv <- recipe(as.formula(paste(target, "~ .")), data = train) %>% update_role(any_of(id_col), new_role = "id") %>% step_zv(all_predictors())
 rec_zv_prep <- prep(rec_zv, training = train, verbose = FALSE)
-train_nzv   <- bake(rec_zv_prep, new_data = NULL)
-test_nzv    <- bake(rec_zv_prep, new_data = test)
-
+train_nzv <- bake(rec_zv_prep, new_data = NULL) 
+test_nzv <- bake(rec_zv_prep, new_data = test) 
 # Imputación ligera de NAs residuales
-rec_imp <- recipe(as.formula(paste(target, "~ .")), data = train_nzv) %>%
-  update_role(any_of(id_col), new_role = "id") %>%
-  step_impute_median(all_numeric_predictors()) %>%
-  step_impute_mode(all_nominal_predictors())
+rec_imp <- recipe(as.formula(paste(target, "~ .")), data = train_nzv) %>% update_role(any_of(id_col), new_role = "id") %>% step_impute_median(all_numeric_predictors()) %>% step_impute_mode(all_nominal_predictors()) 
+rec_imp_prep <- prep(rec_imp, training = train_nzv, verbose = FALSE) 
+train_ready <- bake(rec_imp_prep, new_data = NULL)
+test_ready <- bake(rec_imp_prep, new_data = test_nzv)
 
-rec_imp_prep <- prep(rec_imp, training = train_nzv, verbose = FALSE)
-train_ready  <- bake(rec_imp_prep, new_data = NULL)
-test_ready   <- bake(rec_imp_prep, new_data = test_nzv)
 
 ```
 
 
 ```{r}
-
 # CART Y RF CON CROSS VALIDATION
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(dplyr, rsample, rpart, ranger, purrr, tibble, readr, rlang)
@@ -208,14 +195,91 @@ pred_rf_sp_test <- pmax(rowMeans(pred_mat, na.rm = TRUE), 0)
 readr::write_csv(tibble(!!id_name := id_vals, price = round(pred_rf_sp_test)),
                  "RF_CV_espacial.csv")
 
-# Tabla comparativa de MAE
-mae_tbl <- tibble::tibble(
-  model   = c("CART","RF","RF"),
-  scheme  = c("estandar","estandar","espacial"),
-  MAE_mean = c(mean(mae_cart_reg), mean(mae_rf_reg), mean(mae_rf_sp)),
-  MAE_sd   = c(stats::sd(mse_cart_reg), stats::sd(mse_rf_reg), stats::sd(mse_rf_sp))
+
+```
+
+
+```{r}
+
+# GRAFICO DE IMPORTANCIA DE VARIABLES (RANDOM FOREST ESPACIAL)
+
+
+library(ggplot2)
+library(ranger)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+
+
+# Lista para guardar importancia por fold
+imp_list <- list()
+
+for (k in seq_along(v_spatial$splits)) {
+  tr <- rsample::analysis(v_spatial$splits[[k]])
+
+  fit_k <- fit_rf(tr)  # usa tu función fit_rf()
+
+  imp_list[[k]] <- ranger::importance(fit_k)
+}
+
+# Convertir lista en matriz
+imp_mat <- do.call(cbind, imp_list)
+
+# Promedio de importancia por variable
+imp_mean <- rowMeans(imp_mat, na.rm = TRUE)
+
+# Ordenar de mayor a menor
+imp_rank <- sort(imp_mean, decreasing = TRUE)
+
+# Tibble para gráfico
+imp_tbl <- tibble(
+  variable = names(imp_rank),
+  importance = imp_rank
 )
-print(mae_tbl)
-readr::write_csv(mse_tbl, "mae_comparar.csv")
+
+# Gráfico: Top 10 variables
+
+# Normalizar importancia para que estén en escala 0–1
+imp_tbl_norm <- imp_tbl %>%
+  mutate(importance_scaled = importance / max(importance))
+
+top_n <- 10
+imp_top <- imp_tbl_norm %>% slice_max(order_by = importance_scaled, n = top_n)
+
+imp_variables <- ggplot(imp_top, aes(x = reorder(variable, importance_scaled), y = importance_scaled)) +
+   geom_col(fill = "gray60", width = 0.65) +
+  geom_text(aes(label = round(importance_scaled, 3)),
+            hjust = -0.15, size = 4, color = "gray20") +
+  coord_flip(clip = "off") +
+  labs(
+    title = "Importancia de Variables",
+    x = "Variable",
+    y = "Importancia normalizada"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title = element_text(size = 20, face = "bold"),
+    plot.subtitle = element_text(size = 13),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    panel.grid.major.y = element_blank(),
+    plot.margin = grid::unit(c(20, 30, 20, 20), "pt")
+  ) +
+  expand_limits(y = 1.15 * max(imp_top$importance_scaled))
+
+imp_variables
+#Directorio
+root_dir <- here::here()
+
+# Crea subrutas relativas al proyecto
+path_outputs <- file.path(root_dir, "outputs")
+path_figures <- file.path(path_outputs, "figures")
+ 
+#  Guardar
+dir.create("outputs/figures", recursive = TRUE, showWarnings = FALSE)
+ggsave("outputs/figures/importancia_variables.png", imp_variables, width = 8, height = 6, dpi = 300)
 
 ```
