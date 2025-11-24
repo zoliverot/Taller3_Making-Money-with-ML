@@ -8,75 +8,116 @@ output: html_document
 
 ```{r}
 source("../origen/config.R")
-source("../origen/modeling_utils.R")
+source("../origen/data_utils.R")
 ```
+
+##Librerías
+
+```{r setup, include=FALSE}
+
+# Instalar y cargar pacman (gestor de paquetes)
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, readr, janitor, skimr, naniar, DataExplorer,
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet, gt, tibble, caret
+)
+
+# Verificar paquetes cargados
+pacman::p_loaded()
+
+
+here::i_am("notebooks/04_lineal regression.rmd")
+
+```
+
+
 
 ####### Regresión lineal #######
 # 1. CARGA Y PREPARACIÓN DE DATOS 
 
 ```{r}
-message("Cargando los dataframes finales procesados...")
-train_full <- readRDS(here::here("data", "processed", "train_final.rds"))
 
-# -- Limpieza de Outliers y preparación del dataframe --
-q_low  <- quantile(train_full$price, 0.01, na.rm = TRUE)
-q_high <- quantile(train_full$price, 0.99, na.rm = TRUE)
-vivienda_bogota <- train_full %>%
-  filter(price >= q_low & price <= q_high) %>%
-  # Creamos una variable de precio en millones para que los números sean más manejables
-  mutate(preciom = price / 1e6) %>%
-  # Renombramos 'surface_total' para que coincida con tu ejemplo
-  rename(areaconst = surface_total) %>%
-  # Filtramos NAs en las variables que vamos a usar
-  filter(!is.na(preciom), !is.na(areaconst))
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
 
-message(paste("Datos listos con", nrow(vivienda_bogota), "observaciones."))
+test_final <- readRDS(here::here("data", "processed", "test_final.rds"))
 
 
-# -- PREPARACIÓN DEL TEST SET --
-# Es crucial aplicar las mismas transformaciones.
-# Imputamos NAs en 'areaconst' del test set con la mediana del train set.
-median_area_train <- median(train_learner$areaconst, na.rm = TRUE)
-
-test_learner <- test_full %>%
-  mutate(preciom = NA) %>% # No tenemos el precio aquí
-  rename(areaconst = surface_total) %>%
-  mutate(areaconst = ifelse(is.na(areaconst), median_area_train, areaconst))
-
-message(paste("Datos de entrenamiento listos con", nrow(train_learner), "observaciones."))
-message(paste("Datos de prueba listos con", nrow(test_learner), "observaciones."))
 ```
+
+
+```{r}
+
+
+
+train_final <- readRDS(here::here("data", "processed", "train_final.rds"))
+test_final  <- readRDS(here::here("data", "processed", "test_final.rds"))
+
+
+# LIMPIEZA DE OUTLIERS Y PREPARACIÓN DEL TRAIN
+
+q_low  <- quantile(train_final$price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_final$price, 0.99, na.rm = TRUE)
+
+vivienda_bogota <- train_final %>%
+  filter(price >= q_low & price <= q_high) %>%
+  mutate(
+    preciom = price / 1e6,                   # precio en millones
+    areaconst = surface_total                # renombrar superficie
+  ) %>%
+  filter(!is.na(preciom), !is.na(areaconst)) # limpiar NAs
+
+
+# PREPARACIÓN DEL TEST SET
+
+
+median_area_train <- median(vivienda_bogota$areaconst, na.rm = TRUE)
+
+test_learner <- test_final %>%
+  mutate(
+    preciom = NA,                             # test no tiene precio
+    areaconst = surface_total                 # renombrar igual que train
+  ) %>%
+  mutate(
+    areaconst = ifelse(is.na(areaconst), median_area_train, areaconst)
+  )
+
+
+
+```
+
+
 
 # 2.  AJUSTE Y ANÁLISIS DE DIFERENTES MODELOS LINEALES
 
 ```{r}
-message("\n--- Modelo 1: price ~ area ---")
 modelo1 <- lm(preciom ~ areaconst, data = vivienda_bogota)
 
 # Resumen del modelo
 print(summary(modelo1))
 
 # Intervalos de confianza para los coeficientes
-cat("\nIntervalos de Confianza para los Coeficientes (Modelo 1):\n")
+
 print(confint(modelo1))
 ```
 
 ```{r}
-message("\n--- Modelo 2: log(price) ~ log(area) ---")
+
 # Añadimos 1 para evitar log(0) si hubiera áreas de 0
 modelo2 <- lm(log(preciom) ~ log(areaconst + 1), data = vivienda_bogota)
 print(summary(modelo2))
 ```
 
 ```{r}
-message("\n--- Modelo 3: log(price) ~ area ---")
+
 modelo3 <- lm(log(preciom) ~ areaconst, data = vivienda_bogota)
 print(summary(modelo3))
 ```
 
 
 ```{r}
-message("\n--- Modelo 4: price ~ log(area) ---")
+
 modelo4 <- lm(preciom ~ log(areaconst + 1), data = vivienda_bogota)
 print(summary(modelo4))
 ```
@@ -89,19 +130,19 @@ print(summary(modelo4))
 # El Criterio de Información de Akaike (AIC) nos ayuda a comparar modelos.
 # El modelo con el AIC más bajo es el preferido.
 aic_results <- AIC(modelo1, modelo2, modelo3, modelo4)
-cat("\n--- Comparación de Modelos por AIC (menor es mejor) ---\n")
+
 print(aic_results)
 
 # Seleccionamos el mejor modelo (el que tiene el menor AIC)
 best_model_name <- rownames(aic_results)[which.min(aic_results$AIC)]
-cat("\nEl mejor modelo simple es:", best_model_name, "\n")
+
 best_simple_model <- get(best_model_name)
 ```
 
 # 4. PREDICCIÓN CON EL MEJOR MODELO SIMPLE
 
 ```{r}
-message("\nGenerando predicciones con el mejor modelo simple...")
+
 
 # Verificamos si el mejor modelo predice el logaritmo del precio
 predicts_log <- str_detect(as.character(formula(best_simple_model)), "log") |> any()
@@ -131,8 +172,7 @@ dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
 ruta_archivo_submission <- here::here(ruta_destino, "submission_simple_linear.csv")
 write_csv(submission_simple, ruta_archivo_submission)
 
-message(paste0("\nArchivo de submission del modelo simple guardado en:\n", ruta_archivo_submission))
-cat("\nResumen de precios predichos (Modelo Simple):\n")
+
 summary(submission_simple$price)
 
 ```
@@ -143,7 +183,7 @@ summary(submission_simple$price)
 # Un modelo con una sola variable es una buena base, pero para una mejor
 # predicción, debemos usar más información.
 
-message("\n\n--- Entrenando un Modelo de Regresión Lineal Múltiple más potente... ---")
+
 
 # Seleccionamos un conjunto más rico de variables
 features_multiples <- c(
@@ -168,8 +208,8 @@ lm_spec <- linear_reg() %>% set_engine("lm")
 lm_workflow <- workflow() %>% add_recipe(rec_multi) %>% add_model(lm_spec)
 final_lm_fit <- fit(lm_workflow, data = train_full)
 
-# --- Predicción con el Modelo Múltiple ---
-message("Generando predicciones con el modelo múltiple...")
+# Predicción con el Modelo Múltiple 
+
 
 log_predictions_multi <- predict(final_lm_fit, new_data = test_full)
 
@@ -185,16 +225,17 @@ submission_multiple <- tibble(
 # Guardamos el archivo
 ruta_archivo_submission_multi <- here::here(ruta_destino, "submission_multiple_linear.csv")
 write_csv(submission_multiple, ruta_archivo_submission_multi)
-message(paste0("\nArchivo de submission del modelo múltiple guardado en:\n", ruta_archivo_submission_multi))
 
-cat("\nResumen de precios predichos (Modelo Múltiple):\n")
+
 summary(submission_multiple$price)
 
 ```
 
 
+## Con receta de procesamiento avanzada
+
 ```{r}
-message("\nDefiniendo una receta de preprocesamiento avanzada...")
+
 
 # -------------------------------
 # 1) VARIABLES
@@ -219,10 +260,10 @@ test_learner <- test_final[, vars_necesarias_test, drop = FALSE]
 categorical_features <- c("property_type", "localidad", "estrato")
 
 for (v in categorical_features) {
-  lvls <- union(levels(as.factor(train_learner[[v]])),
-                levels(as.factor(test_learner[[v]])))
-  train_learner[[v]] <- factor(train_learner[[v]], levels = lvls)
-  test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
+  lvls <- union(levels(as.factor(train_final[[v]])),
+                levels(as.factor(test_final[[v]])))
+  train_final[[v]] <- factor(train_final[[v]], levels = lvls)
+  test_final[[v]]  <- factor(test_final[[v]],  levels = lvls)
 }
 
 
@@ -238,7 +279,7 @@ model_formula <- as.formula(
 # 4) RECIPE AVANZADA
 # -------------------------------
 
-rec_avanzada <- recipe(model_formula, data = train_learner) %>%
+rec_avanzada <- recipe(model_formula, data = train_final) %>%
   
   # Transformación de la variable objetivo (solo en training)
   step_log(price, skip = TRUE) %>%
@@ -272,9 +313,9 @@ rec_avanzada <- recipe(model_formula, data = train_learner) %>%
 # No se usa prep(): workflows lo hacen automáticamente
 # prep_rec <- prep(rec_avanzada, training = train_learner)  # ← SE ELIMINA
 
-# -------------------------------
-# 5) WORKFLOW + MODELO
-# -------------------------------
+
+# WORKFLOW + MODELO
+
 
 lm_spec <- linear_reg() %>% set_engine("lm")
 
@@ -282,21 +323,18 @@ lm_workflow <- workflow() %>%
   add_recipe(rec_avanzada) %>% 
   add_model(lm_spec)
 
-# -------------------------------
-# 6) ENTRENAMIENTO
-# -------------------------------
 
-message("\nEntrenando el modelo lineal potenciado...")
-final_fit <- fit(lm_workflow, data = train_learner)
-message("Modelo entrenado.")
+# ENTRENAMIENTO
 
-# -------------------------------
-# 7) PREDICCIÓN FINAL
-# -------------------------------
+final_fit <- fit(lm_workflow, data = train_final)
 
-message("Generando predicciones en el set de prueba...")
 
-log_predictions <- predict(final_fit, new_data = test_learner)
+
+# PREDICCIÓN FINAL
+
+
+
+log_predictions <- predict(final_fit, new_data = test_final)
 
 # Convertimos de log a la escala original
 precios_finales <- exp(log_predictions$.pred)
