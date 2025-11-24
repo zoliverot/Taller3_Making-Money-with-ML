@@ -280,6 +280,6 @@ path_figures <- file.path(path_outputs, "figures")
  
 #  Guardar
 dir.create("outputs/figures", recursive = TRUE, showWarnings = FALSE)
-ggsave("outputs/figures/importancia_variables.png", imp_variables, width = 8, height = 6, dpi = 300)
+ggsave("outputs/figures/importancia_variables.pdf", imp_variables, width = 8, height = 6, dpi = 300)
 
 ```
