@@ -3,8 +3,6 @@ Bases de datos finales, producto de la adecuación de las bases iniciales y la c
 
 Se exportan del Rmd: 01_data_cleaning.
 
-train_final.csv
-train_final.rds
+train_final.csv - train_final.rds
 
-test_final.csv
-test_final.rds
+test_final.csv - test_final.rds
