@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet, Matrix
 )
 
 # Verificar paquetes cargados
@@ -86,11 +86,7 @@ single_test <- names(
 
 
 ```{r}
-library(tidyverse)
-library(recipes)
-library(xgboost)
-library(Matrix)
-library(here)
+
 
 set.seed(123)
 
@@ -110,9 +106,8 @@ for (v in factor_vars) {
   test_learner[[v]]  <- factor(test_learner[[v]],  levels = lvls)
 }
 
-# ============================================================
-# 2. FORMULA
-# ============================================================
+
+# FORMULA
 
 sl <- as.formula(
   price ~ 
@@ -128,9 +123,9 @@ sl <- as.formula(
     localidad + estrato
 )
 
-# ============================================================
-# 3. RECETA CON INTERACCIONES
-# ============================================================
+
+#  RECETA CON INTERACCIONES
+
 
 rec <- recipe(sl, data = train_learner) %>%
   
@@ -152,9 +147,8 @@ X_train <- bake(prep_rec, train_learner) %>% select(-price)
 y_train <- train_learner$price
 X_test  <- bake(prep_rec, test_learner)
 
-# ============================================================
+
 # 4. FIX: ALINEAR COLUMNAS ENTRE TRAIN Y TEST
-# ============================================================
 
 train_names <- colnames(X_train)
 test_names  <- colnames(X_test)
@@ -173,16 +167,15 @@ if (length(missing_in_train) > 0) {
 X_train <- X_train[, train_names]
 X_test  <- X_test[, train_names]
 
-# ============================================================
+
 # 5. MATRICES XGBOOST
-# ============================================================
+
 
 dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
 dtest  <- xgb.DMatrix(data = as.matrix(X_test))
 
-# ============================================================
+
 # 6. PARAMETROS XGBOOST (anti-sobreajuste)
-# ============================================================
 
 params <- list(
   booster = "gbtree",
@@ -205,9 +198,9 @@ xgb_model <- xgb.train(
   verbose = 1
 )
 
-# ============================================================
-# 7. PREDICCION FINAL
-# ============================================================
+
+# PREDICCION FINAL
+
 
 test_pred <- predict(xgb_model, dtest)
 test_pred <- pmax(test_pred, 1)
