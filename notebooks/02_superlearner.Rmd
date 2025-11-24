@@ -21,7 +21,7 @@ knitr::opts_chunk$set(echo = TRUE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
   tidyverse, readr, janitor, skimr, naniar, DataExplorer,
-  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet
+  GGally, ggcorrplot, lubridate, dplyr, tidyr, stringr, stringi, purrr, tibble, here, webshot2, gt, osmdata, sf, tidyverse, here, units, progressr,osmextract, rosm, ggspatial, prettymapr, nngeo, RANN, textclean, spatialsample, blockCV, tidymodels, SuperLearner, nnls, recipes, Xgboost, ranger, glmnet, gt, tibble, caret
 )
 
 # Verificar paquetes cargados
@@ -176,7 +176,7 @@ amenities <- c("has_seguridad","has_balcon","has_piscina","has_gimnasio")
 # RECETA FINAL con interacciones dinámicas y correctas
 
 
-receta_01 <- recipe(sl, data = train_learner) %>%
+receta_01 <- recipe(sl_01, data = train_learner) %>%
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
   step_interact(
     terms = as.formula(
@@ -204,7 +204,7 @@ prep_receta_01 <- prep(receta_01, training = train_learner, retain = TRUE)
 # Matrices finales
 
 
-train_mat <- bake(prep_reeta_01, new_data = train_learner)
+train_mat <- bake(prep_receta_01, new_data = train_learner)
 test_mat  <- bake(prep_receta_01, new_data = test_learner)
 
 X_train <- train_mat %>% select(-price)
@@ -251,7 +251,7 @@ SL.xgboost.reg <- function(..., nrounds = 300) {
 }
 
 mix <- c(
-  "SL.glmnet",       # en vez de SL.lm → evita rank deficiency
+  "SL.glmnet",       # en vez de SL.lm, evita rank deficiency
   "SL.mean",
   "SL.ranger.reg",
   "SL.xgboost.reg"
@@ -287,6 +287,10 @@ write.csv(
   here("outputs", "kaggle_submissions", "sl_xgboost_ranger_01.csv"),
   row.names = FALSE
 )
+
+# MAE del SuperLearner bajo CV ESPACIAL
+mae_01 <- mean(abs(sl_fit$SL.predict - y_train))
+mae_01
 ```
 
 
@@ -507,7 +511,7 @@ test_apto[common]  <- lapply(test_apto[common],  as.numeric)
 
 #  FÓRMULA
 
-sl_02 <- as.formula(
+sl_02_espacial <- as.formula(
   price ~ 
     surface_total + surface_covered + bedrooms + bathrooms +
     month + year +
@@ -526,7 +530,7 @@ sl_02 <- as.formula(
 # 5. RECETA
 
 
-receta_02 <- recipe(sl_02, data = train_apto) %>%
+receta_02_espacial <- recipe(sl_02_espacial, data = train_apto) %>%
   
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
   
@@ -536,12 +540,12 @@ receta_02 <- recipe(sl_02, data = train_apto) %>%
   
   step_zv(all_predictors())
 
-prep_receta_02 <- prep(receta_02, training = train_apto, retain = TRUE)
+prep_receta_02_espacial <- prep(receta_02_espacial, training = train_apto, retain = TRUE)
 
 # Matrices finales
-X_train <- bake(prep_receta_02, new_data = train_apto) %>% select(-price)
+X_train <- bake(prep_receta_02_espacial, new_data = train_apto) %>% select(-price)
 y_train <- train_apto$price
-X_test  <- bake(prep_receta_02, new_data = test_apto)
+X_test  <- bake(prep_receta_02_espacial, new_data = test_apto)
 
 
 
@@ -562,14 +566,14 @@ cv_control <- list(
 )
 
 # Librerías base
-mix <- c(
+mix_espacial <- c(
   "SL.lm",
   "SL.ranger",
   "SL.mean"
 )
 
 # Entrenar SuperLearner con CV espacial
-sl_02 <- SuperLearner(
+sl_02_espacial <- SuperLearner(
   Y = y_train,
   X = as.data.frame(X_train),
   SL.library = mix,
@@ -582,15 +586,15 @@ sl_02 <- SuperLearner(
 
 #  PREDECIR EN TEST Y EXPORTAR
 
-test_02 <- predict(sl_02, newdata = as.data.frame(X_test))$pred
-test_02 <- pmax(test_02, 1)
+test_02_espacial <- predict(sl_02_espacial, newdata = as.data.frame(X_test))$pred
+test_02_espacial <- pmax(test_02_espacial, 1)
 
-output_02 <- test_apto %>%
+output_02_espacial <- test_apto %>%
   select(property_id) %>%
-  mutate(price = test_02)
+  mutate(price = test_02_espacial)
 
 write.csv(
-  output_02,
+  output_02_espacial,
   here("outputs", "kaggle_submissions", "sl_ranger_lm_espacial.csv"),
   row.names = FALSE
 )
@@ -599,39 +603,20 @@ write.csv(
 ## Comparación entre versión 1 y 2 de superlearner lm - random forest
 ```{r}
 # MAE del SuperLearner bajo CV ESPACIAL
-mae_sl_espacial <- mean(abs(sl_02$SL.predict - y_train))
+mae_sl_espacial <- mean(abs(sl_02_espacial$SL.predict - y_train))
 mae_sl_espacial
 
 
 # MAE del superlearner con CV normal
-set.seed(123)
+mae_sl_02 <- mean(abs(sl_02$SL.predict - y_train))
+mae_sl_02
 
-N <- nrow(train_apto)
-K <- 5
 
-fold_indices_random <- split(sample(1:N), rep(1:K, length.out = N))
-
-cv_random <- list(
-  V = K,
-  validRows = fold_indices_random
-)
-
-sl_random <- SuperLearner(
-  Y = y_train,
-  X = as.data.frame(X_train),
-  SL.library = mix,
-  method = "method.NNLS",
-  family = gaussian(),
-  cvControl = cv_random
-)
-
-mae_sl_random <- mean(abs(sl_02$SL.predict - y_train))
-mae_sl_random
 
 
 comparativo_sl_02 <- tibble(
   Modelo = c("SuperLearner CV normal", "SuperLearner CV espacial"),
-  MAE = c(mae_sl_normal, mae_sl_espacial)
+  MAE = c(mae_sl_02, mae_sl_espacial)
 )
 
 comparativo_sl_02
@@ -888,7 +873,7 @@ X_test  <- clean_names(X_test)
 # Entrenar SuperLearner
 
 
-sl_04 <- SuperLearner(
+sl_03 <- SuperLearner(
   Y = y_train,
   X = as.data.frame(X_train),
   SL.library = SL.library,
@@ -899,24 +884,26 @@ sl_04 <- SuperLearner(
 
 
 # Predicciones en test
-test_04 <- predict(sl_04, newdata = as.data.frame(X_test))$pred
-test_04 <- pmax(test_04, 1)
+test_03 <- predict(sl_03, newdata = as.data.frame(X_test))$pred
+test_04 <- pmax(test_03, 1)
 
 # Acotar para subir a kaggel
 
-output_04 <- test_learner %>%
-  mutate(price = round(test_04)) %>%
+output_03 <- test_learner %>%
+  mutate(price = round(test_03)) %>%
   select(property_id, price)
 
 dir.create(here("outputs", "kaggle_submissions"), showWarnings = FALSE, recursive = TRUE)
 
 write.csv(
-  output_04,
-  here("outputs", "kaggle_submissions", "sl_04.csv"),
+  output_03,
+  here("outputs", "kaggle_submissions", "sl_03.csv"),
   row.names = FALSE
 )
 
 
+mae_sl_03 <- mean(abs(sl_03$SL.predict - y_train))
+mae_sl_03
 
 
 ```
@@ -1281,6 +1268,232 @@ summary(submission$price / 1e6)
 
 ```
 
+## Caret (RF–GBM–XGB;RMSE)
+
+1.  **Enfoque `caret`:** Todo el script está ahora centrado en el flujo de trabajo de `caret`: `trainControl()` -> `expand.grid()` -> `train()`.
+2.  **Problema de Regresión:** He adaptado toda la lógica para un problema de **regresión** (predecir `log_price`) en lugar de clasificación.
+    *   La métrica a optimizar es `RMSE` (no `ROC`).
+    *   La regla de división en Random Forest es `"variance"` (no `"gini"`).
+3.  **Preparación de Datos Simplificada:** `caret` tiene una gran ventaja: puede manejar las variables categóricas (como `localidad` y `property_type`) **internamente**. No necesitas usar `recipes` para crear las dummies manualmente. Simplemente le pasamos la fórmula `log_price ~ .` y `caret` se encarga de todo. Esto simplifica mucho el preprocesamiento.
+4.  **Tuning de Hiperparámetros:**
+    *   Para cada modelo (Random Forest, GBM, XGBoost), se define un `expand.grid()`. Esta es una tabla con diferentes combinaciones de hiperparámetros que quieres probar.
+    *   La función `train()` automáticamente ejecuta la validación cruzada para **probar cada combinación de la grilla** y encontrar la que produce el menor `RMSE`.
+5.  **Comparación de Modelos:**
+    *   `resamples()` recopila los resultados de la validación cruzada de todos tus modelos entrenados.
+    *   `summary(model_results)` te muestra una tabla comparativa del RMSE promedio (y otras métricas) para cada modelo. `bwplot()` te lo muestra gráficamente. Esto te permite decidir objetivamente cuál es el mejor modelo.
+6.  **Predicción Final:** Después de comparar, el código selecciona el `best_model` (en el ejemplo, asumo que es `xgb_fit`, pero puedes cambiarlo fácilmente) y lo usa para generar el archivo de submission final.
+
+```{r}
+#  Limpieza de Outliers y creación de log_price 
+q_low  <- quantile(train_final$price, 0.01, na.rm = TRUE)
+q_high <- quantile(train_final$price, 0.99, na.rm = TRUE)
+
+train_learner <- train_final %>%
+  filter(price >= q_low & price <= q_high) %>%
+  mutate(log_price = log1p(price))
+
+test_learner <- test_final # No modificamos el test set de Kaggle
+
+#  Selección de variables y reparación final
+
+# Columnas has_*
+has_cols <- grep("^has_", names(train_learner), value = TRUE)
+
+# Variables finales
+features <- c(
+  "surface_total", "surface_covered", "bedrooms", "bathrooms", "estrato",
+  "latitude", "longitude", "dist_parques", "dist_colegios",
+  "property_type", "localidad",
+  has_cols
+)
+
+train_data <- train_learner %>% select(all_of(features), log_price)
+test_data  <- test_learner  %>% select(all_of(features), property_id)
 
 
+train_data[has_cols] <- lapply(train_data[has_cols], \(x) as.numeric(as.character(x)))
+test_data[has_cols]  <- lapply(test_data[has_cols],  \(x) as.numeric(as.character(x)))
+
+train_data$localidad     <- factor(train_data$localidad)
+test_data$localidad      <- factor(test_data$localidad)
+
+train_data$property_type <- factor(train_data$property_type)
+test_data$property_type  <- factor(test_data$property_type)
+
+cols_factor <- names(train_data)[sapply(train_data, is.factor)]
+
+for (col in cols_factor) {
+  # Expandir niveles del train
+  train_data[[col]] <- factor(
+    train_data[[col]],
+    levels = union(levels(train_data[[col]]), levels(test_data[[col]]))
+  )
+
+  # Igualar test al train
+  test_data[[col]] <- factor(
+    test_data[[col]],
+    levels = levels(train_data[[col]])
+  )
+}
+
+
+# Configuración de la validación cruzada
+# Definimos el control de la validación cruzada (CV)
+# Usaremos 5 folds.
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE, # Muestra el progreso del entrenamiento
+  savePredictions = "final"
+)
+
+# Entrenamiento y tunning de modelos
+# Random forest
+# Grilla de hiperparámetros para tunear
+rf_grid <- expand.grid(
+  mtry = c(5, 10, 15), # Número de variables a probar en cada división
+  min.node.size = c(5, 10),
+  splitrule = "variance" # Regla de división para regresión
+)
+
+set.seed(123)
+rf_fit <- train(
+  log_price ~ .,          # Fórmula: predecir log_price usando todo lo demás
+  data = train_data,
+  method = "ranger",      # Usamos 'ranger' como motor
+  trControl = ctrl,
+  tuneGrid = rf_grid,
+  metric = "RMSE",        # Métrica a optimizar
+  importance = 'permutation' # Medir importancia de variables
+)
+print(rf_fit)
+plot(varImp(rf_fit))
+
+#GBM
+gbm_grid <- expand.grid(
+  n.trees = c(500, 1000),
+  interaction.depth = c(3, 5),
+  shrinkage = c(0.01, 0.05),
+  n.minobsinnode = c(10)
+)
+
+set.seed(123)
+gbm_fit <- train(
+  log_price ~ .,
+  data = train_data,
+  method = "gbm",
+  trControl = ctrl,
+  tuneGrid = gbm_grid,
+  metric = "RMSE",
+  verbose = FALSE # Para que no imprima demasiado
+)
+print(gbm_fit)
+plot(varImp(gbm_fit))
+
+# XGBOOST
+xgb_grid <- expand.grid(
+  nrounds = c(500, 1000),
+  max_depth = c(3, 5),
+  eta = c(0.03, 0.05),
+  gamma = 0,
+  colsample_bytree = 0.7,
+  min_child_weight = 10,
+  subsample = 0.7
+)
+
+set.seed(123)
+xgb_fit <- train(
+  log_price ~ .,
+  data = train_data,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneGrid = xgb_grid,
+  metric = "RMSE",
+  verbosity = 0
+)
+
+print(xgb_fit)
+plot(varImp(xgb_fit))
+
+#Predicción final 
+
+best_model <- xgb_fit  
+
+# Hacer predicciones
+log_predictions <- predict(best_model, newdata = test_data)
+
+# Verificar que no esté vacío
+stopifnot(length(log_predictions) == nrow(test_data))
+
+precios_finales <- expm1(log_predictions)
+
+# Crear submission
+submission <- tibble(
+  property_id = test_data$property_id,
+  price = round(precios_finales)
+)
+
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+
+ruta_archivo_submission <- here::here(ruta_destino, "submission_caret_best_model.csv")
+write_csv(submission, ruta_archivo_submission)
+
+```
+
+
+
+```{r}
+
+# MAE MODELO GANADOR
+
+# Precios reales del train filtrado (sin log)
+y_real <- train_learner$price
+
+# Predicción del mejor modelo sobre el train completo
+log_pred_train <- predict(best_model, newdata = train_data)
+
+# Volver a escala real
+pred_train <- expm1(log_pred_train)
+
+# Calcular MAE global
+MAE_best <- Metrics::mae(y_real, pred_train)
+
+MAE_best
+
+```
+
+```{r}
+
+# TABLA PNG DEL MAE DEL MODELO GANADOR
+
+
+# Calcular MAE global del modelo ganador
+y_real <- train_learner$price
+log_pred_train <- predict(best_model, newdata = train_data)
+pred_train <- expm1(log_pred_train)
+
+MAE_best <- Metrics::mae(y_real, pred_train)
+
+# Crear tabla
+tabla_mae <- tibble(
+  Modelo = best_model$method,
+  MAE_Global = MAE_best
+)
+
+tabla_gt <- tabla_mae %>%
+  gt() %>%
+  tab_header(title = "MAE Global – Modelo Ganador")
+
+# Ruta donde guardas el submission
+ruta_destino <- here::here("outputs", "kaggle_submissions")
+dir.create(ruta_destino, showWarnings = FALSE, recursive = TRUE)
+
+ruta_png <- file.path(ruta_destino, "MAE_best_model_table.png")
+
+# Guardar como PNG
+gtsave(tabla_gt, ruta_png)
+
+
+```
 
