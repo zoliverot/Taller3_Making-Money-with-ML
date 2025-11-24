@@ -30,8 +30,6 @@ El trabajo cubre todo el ciclo analítico:
 | `origen/`               | Funciones R (config, modelado)               |
 | `outputs/`              | Resultados (gráficos, tablas, predicciones) |
 | `reports/`              | Informe y presentación final                 |
-| `references/`           | Bibliografía y artículos                     |
-| `requisitos_R.txt`      | Lista de paquetes requeridos                 |
 | `README.md`             | Este archivo                                 |
 
 
@@ -68,8 +66,7 @@ install.packages(readLines('requirements_R.txt'))
 | **Zeneth Olivero Tapia** | 202512665 |
 
 ## Resultados principales
-- Mejor modelo: TBD  
-- Kaggle Score: TBD  
+- Mejor modelo: RF ESPACIAL
 
 ## Referencias
 - Rosen (1974). *Hedonic Prices and Implicit Markets.*  
