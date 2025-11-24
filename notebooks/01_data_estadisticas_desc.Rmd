@@ -1,7 +1,6 @@
 ---
 title: "Estadisticas descriptivas"
-author: "Laura Diaz"
-date: "2025-11-21"
+author: "Laura Diaz, Vivian Cabanzo, Zeneth Olivero, Cristian Muñoz"
 output: html_document
 ---
 
@@ -9,6 +8,8 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+# Librerias
 ```{r}
 # Instalar y cargar pacman (gestor de paquetes)
 knitr::opts_chunk$set(echo = TRUE)
@@ -22,7 +23,7 @@ pacman::p_load(
 ```
 
 
-Cargar bases iniciales
+# Bases iniciales
 ```{r}
 train <- read_csv("../data/train.csv")
 test <- read_csv("../data/test.csv")
@@ -36,7 +37,7 @@ colnames(train)
 
 ```
 
-Cargar bases finales
+# Bases finales
 ```{r}
 train_final <- read_csv("../data/processed/train_final.csv")
 test_final <- read_csv("../data/processed/test_final.csv")
@@ -130,14 +131,14 @@ kable(
 
 ```
 
-ESTADISTICAS DESCRIPTIVAS
+# ESTADISTICAS DESCRIPTIVAS
 
 ```{r}
 # ============================================================
 # 0) Crear carpetas de salida
 # ============================================================
 dir.create("outputs", showWarnings = FALSE)
-dir.create("outputs/figures", showWarnings = FALSE)
+dir.create("../outputs/figures", showWarnings = FALSE)
 
 
 # ============================================================
@@ -183,8 +184,8 @@ print(cat_cols)
 # ============================================================
 save_plot <- function(plot, filename, width = 10, height = 8) {
 
-  pdf_path <- file.path("outputs/figures", paste0(filename, ".pdf"))
-  png_path <- file.path("outputs/figures", paste0(filename, ".png"))
+  pdf_path <- file.path("../outputs/figures", paste0(filename, ".pdf"))
+  png_path <- file.path("../outputs/figures", paste0(filename, ".png"))
 
   # Guardar PDF
   ggsave(
@@ -242,7 +243,7 @@ library(forcats)
 # 0) Crear carpetas de salida
 # ============================================================
 dir.create("outputs", showWarnings = FALSE)
-dir.create("outputs/figures", showWarnings = FALSE)
+dir.create("../outputs/figures", showWarnings = FALSE)
 
 # ============================================================
 # Seleccionar dos categóricas
@@ -313,14 +314,14 @@ print(combo_2x2)
 # 6. Guardar en outputs/figures — PDF + PNG
 # ============================================================
 ggsave(
-  filename = "outputs/figures/graficos_target_2x2.pdf",
+  filename = "../outputs/figures/graficos_target_2x2.pdf",
   plot = combo_2x2,
   device = "pdf",
   width = 14, height = 14, dpi = 300
 )
 
 ggsave(
-  filename = "outputs/figures/graficos_target_2x2.png",
+  filename = "../outputs/figures/graficos_target_2x2.png",
   plot = combo_2x2,
   device = "png",
   width = 14, height = 14, dpi = 300
